@@ -1,0 +1,16 @@
+anthropic>=0.57.0
+edge-tts>=6.1.12
+feedparser>=6.0.11
+gnews>=0.3.7
+praw>=7.8.1
+requests>=2.32.3
+Pillow>=11.0.0
+google-api-python-client>=2.152.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.1
+APScheduler>=3.11.0
+portalocker>=3.1.1
+tenacity>=9.0.0
+PyYAML>=6.0.2
+python-dotenv>=1.0.0
+python-dateutil>=2.9.0

@@ -1,0 +1,124 @@
+groq:
+  groq_api_key: "${GROQ_API_KEY}"
+  groq_model: "llama-3.3-70b-versatile"
+
+sources:
+  rss:
+    enabled: true
+    feeds:
+      - name: "NHK NEWS WEB"
+        url: "https://www3.nhk.or.jp/rss/news/cat0.xml"
+        language: "ja"
+      - name: "ITmedia News"
+        url: "https://rss.itmedia.co.jp/rss/2.0/news_bursts.xml"
+        language: "ja"
+      - name: "GIGAZINE"
+        url: "https://gigazine.net/news/rss_2.0/"
+        language: "ja"
+    max_items_per_feed: 10
+
+  gnews:
+    enabled: true
+    api_key: "${GNEWS_API_KEY}"
+    language: "ja"
+    country: "jp"
+    max_results: 10
+    topics:
+      - "technology"
+      - "science"
+
+  reddit:
+    enabled: true
+    client_id: "${REDDIT_CLIENT_ID}"
+    client_secret: "${REDDIT_CLIENT_SECRET}"
+    user_agent: "youtube_autoposter/1.0"
+    subreddits:
+      - "worldnews"
+      - "technology"
+      - "science"
+      - "artificial"
+    max_posts_per_sub: 5
+    sort: "hot"
+
+  hackernews:
+    enabled: true
+    max_stories: 15
+    min_score: 100
+
+tts:
+  provider: "voicevox"
+
+edge_tts:
+  voice: "ja-JP-NanamiNeural"
+  rate: "+10%"
+
+voicevox:
+  base_url: "http://localhost:50021"
+  speaker_id: 3
+  speed_scale: 1.1
+  pitch_scale: 0.0
+  intonation_scale: 1.0
+  volume_scale: 1.0
+  timeout: 60
+  retry_attempts: 3
+
+images:
+  pexels:
+    enabled: true
+    api_key: "${PEXELS_API_KEY}"
+    per_page: 15
+  unsplash:
+    enabled: false
+    access_key: ""
+    per_page: 15
+  images_per_video: 8
+
+video:
+  resolution: "1920x1080"
+  fps: 30
+  display_duration_sec: 5
+  bgm_volume: 0.15
+  se_volume: 0.5
+  output_format: "mp4"
+  ffmpeg_path: "C:/Users/orang/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.1-full_build/bin/ffmpeg.exe"
+  temp_dir: "output"
+
+thumbnail:
+  width: 1280
+  height: 720
+  font_path: "config/fonts/NotoSansCJKjp-Regular.otf"
+  font_size_title: 52
+  font_size_subtitle: 32
+  background_color: [20, 20, 40]
+  title_color: [255, 255, 100]
+  subtitle_color: [200, 200, 200]
+  overlay_opacity: 0.55
+  max_title_chars_per_line: 16
+
+youtube:
+  credentials_file: "config/credentials/client_secrets.json"
+  token_file: "config/credentials/token.json"
+  category_id: "28"
+  privacy_status: "public"
+  default_language: "ja"
+  made_for_kids: false
+  notify_subscribers: true
+
+scheduler:
+  timezone: "Asia/Tokyo"
+  jobs:
+    - id: "morning_post"
+      cron: "0 7 * * *"
+    - id: "evening_post"
+      cron: "0 19 * * *"
+  lock_file: "output/.scheduler.lock"
+
+deduplication:
+  store_file: "data/seen_items.json"
+  ttl_days: 30
+
+logging:
+  level: "INFO"
+  file: "logs/autoposter.log"
+  max_bytes: 10485760
+  backup_count: 5
