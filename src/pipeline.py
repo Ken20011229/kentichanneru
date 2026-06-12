@@ -9,6 +9,7 @@ from datetime import datetime
 from src.config_loader import load_config
 from src.deduplicator import Deduplicator
 from src.fetcher.aggregator import fetch_and_select_item
+from src.images.fallback_generator import generate_fallback_images
 from src.images.pexels_client import PexelsClient
 from src.images.unsplash_client import UnsplashClient
 from src.script_gen.claude_scriptwriter import ClaudeScriptWriter
@@ -85,8 +86,10 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
                 remaining = total_images - len(image_paths)
                 image_paths += unsplash.fetch_images_for_keywords(keywords, image_dir, total=remaining)
 
-        if len(image_paths) < 3:
-            raise RuntimeError(f"Not enough images fetched ({len(image_paths)}). Check API keys.")
+        if len(image_paths) < total_images:
+            shortfall = total_images - len(image_paths)
+            logger.warning(f"Only {len(image_paths)} images from APIs, generating {shortfall} fallback gradient images")
+            image_paths += generate_fallback_images(image_dir, shortfall)
 
         # Cycle images to cover the full audio duration
         display_dur = config["video"].get("display_duration_sec", 5)
