@@ -174,10 +174,10 @@ class ClaudeScriptWriter:
         segments = data["script_segments"]
         if not segments:
             raise ValueError("script_segments is empty")
+        if len(segments) < 8:
+            raise ValueError(f"Too few script_segments: {len(segments)} (minimum 8 required)")
         if len(segments) < 12:
-            raise ValueError(f"Too few script_segments: {len(segments)} (minimum 12 required)")
-        if len(segments) < 15:
-            logger.warning(f"script_segments below target: {len(segments)} (target 16-20)")
+            logger.warning(f"script_segments below target: {len(segments)} (target 12-20)")
         valid_vtypes = {"intro", "point", "keyword", "detail"}
         for seg in segments:
             if "text" not in seg:
