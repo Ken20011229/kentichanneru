@@ -9,7 +9,7 @@ on:
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +28,40 @@ jobs:
           restore-keys: autoposter-data-
 
       - name: Install system dependencies
-        run: sudo apt-get install -y ffmpeg
+        run: sudo apt-get install -y ffmpeg p7zip-full
+
+      - name: Cache VOICEVOX Engine
+        id: cache-voicevox
+        uses: actions/cache@v4
+        with:
+          path: voicevox_engine
+          key: voicevox-engine-0.25.2-linux-x64
+
+      - name: Download & Extract VOICEVOX Engine
+        if: steps.cache-voicevox.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://github.com/VOICEVOX/voicevox_engine/releases/download/0.25.2/voicevox_engine-linux-cpu-x64-0.25.2.7z.001" -O voicevox.7z.001
+          mkdir -p voicevox_raw
+          7z x voicevox.7z.001 -o./voicevox_raw/ -y
+          rm voicevox.7z.001
+          # run バイナリのある最上位ディレクトリを voicevox_engine/ に移動
+          RUN_PATH=$(find voicevox_raw -name "run" -type f | head -1)
+          ENGINE_DIR=$(dirname "$RUN_PATH")
+          mv "$ENGINE_DIR" voicevox_engine
+          rm -rf voicevox_raw
+
+      - name: Start VOICEVOX Engine
+        run: |
+          chmod +x voicevox_engine/run
+          ./voicevox_engine/run --host 127.0.0.1 --port 50021 &
+          echo "Waiting for VOICEVOX to start..."
+          for i in $(seq 1 60); do
+            if curl -s http://127.0.0.1:50021/version > /dev/null 2>&1; then
+              echo "VOICEVOX ready: $(curl -s http://127.0.0.1:50021/version)"
+              break
+            fi
+            sleep 2
+          done
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
@@ -54,7 +87,7 @@ jobs:
           GNEWS_API_KEY: PLACEHOLDER
           REDDIT_CLIENT_ID: PLACEHOLDER
           REDDIT_CLIENT_SECRET: PLACEHOLDER
-          TTS_PROVIDER: edge_tts
+          TTS_PROVIDER: voicevox
           FFMPEG_PATH: ffmpeg
         run: python main.py --once
 
