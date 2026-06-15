@@ -33,7 +33,6 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      # echo ではなく printenv を使うことで JSON 内の特殊文字を安全に書き出す
       - name: Setup YouTube credentials
         env:
           CLIENT_SECRETS: ${{ secrets.YOUTUBE_CLIENT_SECRETS }}
@@ -42,6 +41,11 @@ jobs:
           mkdir -p config/credentials
           printenv CLIENT_SECRETS > config/credentials/client_secrets.json
           printenv TOKEN_JSON     > config/credentials/token.json
+          echo "client_secrets.json: $(wc -c < config/credentials/client_secrets.json) bytes"
+          echo "token.json:          $(wc -c < config/credentials/token.json) bytes"
+          python -c "import json; json.load(open('config/credentials/token.json'))" \
+            && echo "token.json: valid JSON" \
+            || { echo "ERROR: token.json is empty or invalid — set YOUTUBE_TOKEN secret correctly"; exit 1; }
 
       - name: Run pipeline
         env:
