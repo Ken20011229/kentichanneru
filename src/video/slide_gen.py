@@ -97,6 +97,22 @@ def _make_bg() -> Image.Image:
     return Image.alpha_composite(canvas, rule)
 
 
+def _make_dark_bg(accent: tuple) -> Image.Image:
+    """Dark intro background with subtle accent glow — matches title-card style."""
+    r, g, b = accent
+    canvas = Image.new("RGBA", (W, H), (10, 12, 22, 255))
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    for cx, cy, radius, alpha in [
+        (int(W * 0.72), int(H * 0.30), 340, 20),
+        (int(W * 0.18), int(H * 0.70), 240, 12),
+        (int(W * 0.50), int(H * 0.85), 200, 8),
+    ]:
+        gd.ellipse([(cx - radius, cy - radius), (cx + radius, cy + radius)],
+                   fill=(r, g, b, alpha))
+    return Image.alpha_composite(canvas, glow.filter(ImageFilter.GaussianBlur(radius=90)))
+
+
 def _card_shadow(canvas: Image.Image, x1: int, y1: int, x2: int, y2: int,
                  radius: int = 24) -> Image.Image:
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -141,6 +157,27 @@ def _paste_char(canvas: Image.Image, path: str, h_ratio: float,
     except Exception as e:
         logger.warning(f"Character paste failed ({side}): {e}")
         return canvas, fallback
+
+
+def _char_variant(base_path: str, suffix: str) -> str:
+    """Return base_path with suffix before extension if it exists, else base_path."""
+    if not base_path:
+        return base_path
+    p = Path(base_path)
+    alt = p.parent / f"{p.stem}{suffix}{p.suffix}"
+    return str(alt) if alt.exists() else base_path
+
+
+def _resolve_char_paths(char_cfg: dict, visual_type: str) -> tuple[str, str]:
+    """Select character image variants by visual_type using filename convention."""
+    right = char_cfg.get("image_path", "")
+    left  = char_cfg.get("left_image_path", "")
+    if visual_type == "keyword":
+        right = _char_variant(right, "1")
+        left  = _char_variant(left,  "1")
+    elif visual_type == "point":
+        right = _char_variant(right, "2")
+    return right, left
 
 
 def _paste_characters(canvas: Image.Image,
@@ -233,60 +270,59 @@ def _text_card(canvas: Image.Image, draw: ImageDraw.ImageDraw,
 def _slide_intro(fp: str, title: str, text: str, accent: tuple,
                  section_num: int, badge_label: str,
                  right_path: str, left_path: str) -> Image.Image:
-    """INTRO: centered large white card with title, characters at both sides."""
-    canvas = _make_bg()
-    canvas, card_l, card_r = _paste_characters(canvas, right_path, left_path, char_ratio=0.70)
-    draw = ImageDraw.Draw(canvas)
-    _draw_section_badge(draw, fp, accent, section_num, badge_label)
-
-    # White card: bounded by character inner edges
-    CARD_L = card_l
-    CARD_R = card_r
-    CARD_T = 100
-    CARD_B = _CONTENT_BOTTOM - 10
-    PAD    = 48
-
-    canvas = _card_shadow(canvas, CARD_L, CARD_T, CARD_R, CARD_B)
+    """INTRO: dark background title card — channel label top, large title, subtle subtext."""
+    canvas = _make_dark_bg(accent)
+    canvas, card_l, card_r = _paste_characters(canvas, right_path, left_path, char_ratio=0.68)
     draw   = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle([(CARD_L, CARD_T), (CARD_R, CARD_B)],
-                           radius=24, fill=(255, 255, 255, 238))
-    draw.rounded_rectangle([(CARD_L, CARD_T), (CARD_L + 8, CARD_B)],
-                           radius=6, fill=(*accent, 255))
 
-    inner_w = CARD_R - CARD_L - PAD * 2 - 8
-    text_x  = CARD_L + PAD + 8
+    # Badge label (channel name) centered at top in accent color
+    font_badge = _font(fp, 30)
+    bw = _tw(draw, badge_label, font_badge)
+    draw.text(((W - bw) // 2, 52), badge_label, font=font_badge, fill=(*accent, 220))
 
-    for size in (88, 72, 60, 50, 42):
-        ft    = _font(fp, size)
-        lines = _wrap_px(draw, title, ft, inner_w)
+    # Short accent line below badge
+    line_y = 98
+    draw.rectangle([(W // 2 - 160, line_y), (W // 2 + 160, line_y + 3)],
+                   fill=(*accent, 140))
+
+    # Main title: white, large, left-aligned within character bounds
+    inner_w = card_r - card_l - 80
+    text_x  = card_l + 44
+
+    for size in (92, 76, 64, 54, 44):
+        ft     = _font(fp, size)
+        lines  = _wrap_px(draw, title, ft, inner_w)
         max_lh = max((_th(draw, ln, ft) for ln in lines), default=size)
-        lh     = max_lh + 18
-        if lh * len(lines) < (CARD_B - CARD_T) - PAD * 2 - 80 and len(lines) <= 4:
+        lh     = max_lh + 22
+        if lh * len(lines) < int(H * 0.50) and len(lines) <= 4:
             font_title = ft
             break
     else:
-        font_title = _font(fp, 42)
+        font_title = _font(fp, 44)
         lines = _wrap_px(draw, title, font_title, inner_w)
 
-    lh    = max((_th(draw, ln, font_title) for ln in lines), default=42) + 18
+    lh    = max((_th(draw, ln, font_title) for ln in lines), default=44) + 22
     total = lh * len(lines)
-    ty    = CARD_T + PAD + max(0, ((CARD_B - CARD_T) - PAD * 2 - total) // 2)
+    ty    = 130 + max(0, (int(H * 0.48) - total) // 2)
 
     for ln in lines:
-        draw.text((text_x, ty), ln, font=font_title, fill=_COLOR_TITLE)
+        draw.text((text_x, ty), ln, font=font_title, fill=(255, 255, 255, 255))
         ty += lh
 
-    if text and ty < CARD_B - 60:
+    # Narration preview in muted color below title
+    if text and ty + 48 < _CONTENT_BOTTOM:
         font_sub  = _font(fp, 30)
         sub_lines = _wrap_px(draw, text, font_sub, inner_w)
-        ty += 18
-        for ln in sub_lines[:3]:
-            if ty + _th(draw, ln, font_sub) + 10 > CARD_B - PAD:
+        ty += 26
+        for ln in sub_lines[:2]:
+            if ty + _th(draw, ln, font_sub) > _CONTENT_BOTTOM - 20:
                 break
-            draw.text((text_x, ty), ln, font=font_sub, fill=_COLOR_SUPPORT)
-            ty += _th(draw, ln, font_sub) + 10
+            draw.text((text_x, ty), ln, font=font_sub, fill=(190, 195, 210, 180))
+            ty += _th(draw, ln, font_sub) + 12
 
-    _draw_accent_stripe(draw, accent)
+    # Accent stripes top and bottom
+    draw.rectangle([(0, 0), (W, 5)], fill=(*accent, 255))
+    draw.rectangle([(0, H - 5), (W, H)], fill=(*accent, 255))
     return canvas.convert("RGB")
 
 
@@ -333,40 +369,47 @@ def _slide_point(fp: str, text: str, keyword: str, accent: tuple,
 def _slide_keyword(fp: str, text: str, keyword: str, accent: tuple,
                    section_num: int, badge_label: str,
                    right_path: str, left_path: str) -> Image.Image:
-    """KEYWORD: hero keyword box centered top, narration card below, characters."""
+    """KEYWORD: large keyword text directly on background (no box), narration card below."""
     canvas = _make_bg()
     canvas, card_l, card_r = _paste_characters(canvas, right_path, left_path, char_ratio=0.75)
     draw = ImageDraw.Draw(canvas)
     _draw_section_badge(draw, fp, accent, section_num, badge_label)
 
-    # Hero keyword box — centered within card bounds, with auto font sizing
-    kw_text  = keyword if keyword else "POINT"
-    max_box_w = card_r - card_l - 40
-    font_kw  = _font(fp, 60)
-    for size in (110, 90, 74, 60):
+    # Keyword as large hero text directly on the background
+    kw_text = keyword if keyword else "POINT"
+    max_w   = card_r - card_l - 60
+    font_kw = _font(fp, 60)
+    for size in (120, 100, 84, 68, 54):
         fk   = _font(fp, size)
         kw_w = _tw(draw, kw_text, fk)
-        if kw_w < max_box_w:
+        if kw_w < max_w:
             font_kw = fk
             break
 
     kw_w = _tw(draw, kw_text, font_kw)
     kw_h = _th(draw, kw_text, font_kw)
-    kpx, kpy = 60, 24
-    box_w  = kw_w + kpx * 2
-    box_h  = kw_h + kpy * 2
-    box_x  = card_l + (card_r - card_l - box_w) // 2
-    box_y  = 100
+    kw_x = card_l + (card_r - card_l - kw_w) // 2
+    kw_y = 108
 
-    canvas = _card_shadow(canvas, box_x, box_y, box_x + box_w, box_y + box_h, radius=20)
+    # Subtle accent highlight band behind the keyword
+    hi = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    hd = ImageDraw.Draw(hi)
+    hd.rounded_rectangle(
+        [(kw_x - 28, kw_y - 14), (kw_x + kw_w + 28, kw_y + kw_h + 14)],
+        radius=18, fill=(*accent, 28),
+    )
+    canvas = Image.alpha_composite(canvas, hi)
     draw   = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle([(box_x, box_y), (box_x + box_w, box_y + box_h)],
-                           radius=20, fill=(*accent, 255))
-    draw.text((box_x + kpx, box_y + kpy), kw_text, font=font_kw, fill=_COLOR_WHITE)
 
-    # Supporting text card below
-    CARD_T = box_y + box_h + 36
+    # Keyword text in dark color (cream bg so dark text reads better than white)
+    draw.text((kw_x, kw_y), kw_text, font=font_kw, fill=_COLOR_TITLE)
 
+    # Accent underline
+    ul_y = kw_y + kw_h + 10
+    draw.rectangle([(kw_x, ul_y), (kw_x + kw_w, ul_y + 5)], fill=(*accent, 255))
+
+    # Narration text card below
+    CARD_T = ul_y + 32
     _, canvas = _text_card(
         canvas, draw, fp, text, accent,
         x1=card_l, y1=CARD_T, x2=card_r,
@@ -427,8 +470,6 @@ def generate_slides(
     accent      = tuple(ch.get("accent_color", list(_DEFAULT_ACCENT)))
     badge_label = ch.get("badge_label", "テック速報")
     char_cfg    = config.get("character", {})
-    right_path  = char_cfg.get("image_path", "")
-    left_path   = char_cfg.get("left_image_path", "")
 
     total = max(len(segments), 1)
 
@@ -446,6 +487,8 @@ def generate_slides(
 
         if idx == 0:
             visual_type = "intro"
+
+        right_path, left_path = _resolve_char_paths(char_cfg, visual_type)
 
         sec_num, sec_label = _section(idx)
         # For intro, use the channel badge_label; other slides use section label
