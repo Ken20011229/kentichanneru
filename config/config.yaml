@@ -45,6 +45,10 @@ sources:
     max_stories: 15
     min_score: 100
 
+  google_trends:
+    enabled: true
+    max_topics: 20   # daily trending topics to fetch
+
 tts:
   provider: "voicevox"
 
@@ -54,7 +58,8 @@ edge_tts:
 
 voicevox:
   base_url: "http://localhost:50021"
-  speaker_id: 3
+  speaker_id: 3          # ずんだもん（右）
+  left_speaker_id: 8     # 春日部つむぎ（左）※VOICEVOXのスピーカー一覧で要確認
   speed_scale: 1.1
   pitch_scale: 0.0
   intonation_scale: 1.0
@@ -77,7 +82,8 @@ video:
   resolution: "1920x1080"
   fps: 30
   display_duration_sec: 5
-  bgm_volume: 0.15
+  bgm_volume: 0.05
+  xfade_duration: 0.5
   se_volume: 0.5
   output_format: "mp4"
   ffmpeg_path: "C:/Users/orang/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.1-full_build/bin/ffmpeg.exe"
@@ -104,6 +110,15 @@ youtube:
   made_for_kids: false
   notify_subscribers: true
 
+character:
+  image_path: "assets/characters/zundamon.png"          # 右キャラ（ずんだもん）
+  left_image_path: "assets/characters/tsumugi.png"      # 左キャラ（春日部つむぎ）
+  overlay_size: 480
+
+se:
+  intro: "assets/se/intro.mp3"
+  volume: 0.70
+
 scheduler:
   timezone: "Asia/Tokyo"
   jobs:
@@ -112,6 +127,132 @@ scheduler:
     - id: "evening_post"
       cron: "0 19 * * *"
   lock_file: "output/.scheduler.lock"
+
+channel_rotation:
+  state_file: "data/channel_state.json"
+
+channels:
+  - id: "news"
+    name: "ニュース"
+    youtube_category_id: "25"
+    accent_color: [50, 200, 80]
+    badge_label: "ニュース速報"
+    script_style: "ニュースキャスター。客観的・正確・簡潔に伝える。視聴者が内容を素早く理解できるよう心がける。"
+    rss_feeds:
+      - url: "https://www3.nhk.or.jp/rss/news/cat0.xml"
+        name: "NHK NEWS WEB"
+        language: "ja"
+      - url: "https://rss.itmedia.co.jp/rss/2.0/news_bursts.xml"
+        name: "ITmedia"
+        language: "ja"
+      - url: "https://gigazine.net/news/rss_2.0/"
+        name: "GIGAZINE"
+        language: "ja"
+    subreddits: []
+    use_hackernews: false
+
+  - id: "technology"
+    name: "テクノロジー"
+    youtube_category_id: "28"
+    accent_color: [40, 160, 255]
+    badge_label: "テック速報"
+    script_style: "テクノロジー解説者。専門知識を分かりやすく噛み砕き、ワクワク感を大切にする。"
+    rss_feeds:
+      - url: "https://gigazine.net/news/rss_2.0/"
+        name: "GIGAZINE"
+        language: "ja"
+    subreddits:
+      - technology
+      - programming
+      - artificial
+    use_hackernews: true
+
+  - id: "gaming"
+    name: "ゲーム"
+    youtube_category_id: "20"
+    accent_color: [120, 80, 255]
+    badge_label: "ゲーム情報"
+    script_style: "ゲーム系YouTuber。テンション高め、楽しく、視聴者と一緒に盛り上がるスタイル。"
+    rss_feeds:
+      - url: "https://game.watch.impress.co.jp/data/rss/1.0/gmw/feed.rdf"
+        name: "Game Watch"
+        language: "ja"
+    subreddits:
+      - gaming
+      - NintendoSwitch
+      - PS5
+      - pcgaming
+    use_hackernews: false
+
+  - id: "entertainment"
+    name: "エンタメ"
+    youtube_category_id: "24"
+    accent_color: [255, 180, 30]
+    badge_label: "エンタメ最新"
+    script_style: "エンタメ系ナレーター。明るく親しみやすく、視聴者を楽しませる話し方。"
+    rss_feeds: []
+    subreddits:
+      - movies
+      - television
+      - anime
+      - manga
+    use_hackernews: false
+
+  - id: "science"
+    name: "サイエンス"
+    youtube_category_id: "28"
+    accent_color: [30, 210, 180]
+    badge_label: "科学最前線"
+    script_style: "科学番組ナレーター。知的好奇心を刺激し、驚きと発見を丁寧に伝える。"
+    rss_feeds: []
+    subreddits:
+      - science
+      - space
+      - physics
+      - biology
+    use_hackernews: true
+
+  - id: "sports"
+    name: "スポーツ"
+    youtube_category_id: "17"
+    accent_color: [255, 60, 60]
+    badge_label: "スポーツ速報"
+    script_style: "スポーツ実況者。興奮を伝え、ドラマとダイナミズムを描く臨場感あふれる話し方。"
+    rss_feeds: []
+    subreddits:
+      - sports
+      - baseball
+      - soccer
+      - formula1
+    use_hackernews: false
+
+  - id: "cooking"
+    name: "料理"
+    youtube_category_id: "26"
+    accent_color: [255, 120, 40]
+    badge_label: "グルメ情報"
+    script_style: "料理・グルメ系ナレーター。食への愛情と美味しさを伝える、温かみのある話し方。"
+    rss_feeds: []
+    subreddits:
+      - food
+      - cooking
+      - JapaneseFood
+      - recipes
+    use_hackernews: false
+
+  - id: "music"
+    name: "音楽"
+    youtube_category_id: "10"
+    accent_color: [200, 60, 210]
+    badge_label: "音楽ニュース"
+    script_style: "音楽系ナレーター。リズム感があり、感情豊かに音楽の世界と魅力を伝える。"
+    rss_feeds: []
+    subreddits:
+      - Music
+      - jpop
+      - jrock
+      - indieheads
+    use_hackernews: false
 
 deduplication:
   store_file: "data/seen_items.json"

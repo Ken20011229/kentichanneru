@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 class VoicevoxClient:
     def __init__(self, config: dict):
         self.base_url = config["base_url"].rstrip("/")
-        self.speaker_id = config["speaker_id"]
+        self.speaker_id       = config["speaker_id"]           # 右キャラ（偶数セグメント）
+        self.left_speaker_id  = config.get("left_speaker_id")  # 左キャラ（奇数セグメント）None=使わない
         self.speed_scale = config.get("speed_scale", 1.0)
         self.pitch_scale = config.get("pitch_scale", 0.0)
         self.intonation_scale = config.get("intonation_scale", 1.0)
@@ -27,16 +28,18 @@ class VoicevoxClient:
             return False
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def synthesize(self, text: str, output_path: str) -> str:
+    def synthesize(self, text: str, output_path: str, speaker_id: int = None) -> str:
         if not self.check_server():
             raise ConnectionError(
                 f"VOICEVOX server is not reachable at {self.base_url}. "
                 "Please start VOICEVOX Engine before running the pipeline."
             )
 
+        sid = speaker_id if speaker_id is not None else self.speaker_id
+
         query_resp = requests.post(
             f"{self.base_url}/audio_query",
-            params={"text": text, "speaker": self.speaker_id},
+            params={"text": text, "speaker": sid},
             timeout=self.timeout,
         )
         query_resp.raise_for_status()
@@ -49,7 +52,7 @@ class VoicevoxClient:
 
         synth_resp = requests.post(
             f"{self.base_url}/synthesis",
-            params={"speaker": self.speaker_id},
+            params={"speaker": sid},
             json=query,
             timeout=self.timeout,
         )
@@ -68,11 +71,20 @@ class VoicevoxClient:
         os.makedirs(output_dir, exist_ok=True)
         results = []
         for i, seg in enumerate(segments):
+            # 偶数セグメント → 右キャラ（ずんだもん）、奇数セグメント → 左キャラ（つむぎ）
+            if self.left_speaker_id and i % 2 == 1:
+                sid = self.left_speaker_id
+                speaker_side = "left"
+            else:
+                sid = self.speaker_id
+                speaker_side = "right"
+
             out_path = os.path.join(output_dir, f"seg_{i:03d}.wav")
-            logger.debug(f"Synthesizing segment {i}: {seg['text'][:40]}...")
-            self.synthesize(seg["text"], out_path)
+            logger.debug(f"Synthesizing segment {i} [{speaker_side} speaker={sid}]: {seg['text'][:40]}...")
+            self.synthesize(seg["text"], out_path, speaker_id=sid)
             duration = self._get_wav_duration(out_path)
-            results.append({**seg, "audio_path": out_path, "duration_sec": duration})
+            results.append({**seg, "audio_path": out_path, "duration_sec": duration,
+                            "speaker_side": speaker_side})
             logger.debug(f"  -> {duration:.2f}s")
         total = sum(r["duration_sec"] for r in results)
         logger.info(f"TTS complete: {len(results)} segments, total {total:.1f}s")

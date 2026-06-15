@@ -1,53 +1,65 @@
-name: YouTube Auto Poster
+name: YouTube AutoPoster
 
 on:
   schedule:
-    - cron: '0 22 * * *'  # 07:00 JST
-    - cron: '0 10 * * *'  # 19:00 JST
+    - cron: '0 22 * * *'   # 07:00 JST
+    - cron: '0 10 * * *'   # 19:00 JST
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   post:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
 
-      - name: Install FFmpeg
+      # data/ を前回実行から引き継ぐ（重複排除・チャンネルローテーション等）
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: autoposter-data-${{ github.run_id }}
+          restore-keys: autoposter-data-
+
+      - name: Install system dependencies
         run: sudo apt-get install -y ffmpeg
 
-      - name: Install dependencies
-        run: pip install --no-cache-dir -r requirements.txt
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
 
-      - name: Write credentials
+      # echo ではなく printenv を使うことで JSON 内の特殊文字を安全に書き出す
+      - name: Setup YouTube credentials
+        env:
+          CLIENT_SECRETS: ${{ secrets.YOUTUBE_CLIENT_SECRETS }}
+          TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN }}
         run: |
           mkdir -p config/credentials
-          echo '${{ secrets.YOUTUBE_CLIENT_SECRETS }}' > config/credentials/client_secrets.json
-          echo '${{ secrets.YOUTUBE_TOKEN }}' > config/credentials/token.json
+          printenv CLIENT_SECRETS > config/credentials/client_secrets.json
+          printenv TOKEN_JSON     > config/credentials/token.json
 
       - name: Run pipeline
-        run: python main.py --once
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GNEWS_API_KEY: ${{ secrets.GNEWS_API_KEY }}
-          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
-          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          GNEWS_API_KEY: PLACEHOLDER
+          REDDIT_CLIENT_ID: PLACEHOLDER
+          REDDIT_CLIENT_SECRET: PLACEHOLDER
           TTS_PROVIDER: edge_tts
           FFMPEG_PATH: ffmpeg
+        run: python main.py --once
 
-      - name: Save seen items
+      # google-auth がアクセストークンを更新した場合に Secret を上書き
+      - name: Refresh YouTube token secret
         if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/seen_items.json
-          git diff --cached --quiet || (git commit -m "chore: update seen items [skip ci]" && git pull --rebase && git push)
+          if [ -f config/credentials/token.json ]; then
+            gh secret set YOUTUBE_TOKEN < config/credentials/token.json
+          fi

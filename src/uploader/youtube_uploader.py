@@ -8,7 +8,11 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 logger = logging.getLogger(__name__)
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
+]
 
 
 class YouTubeUploader:
@@ -48,7 +52,7 @@ class YouTubeUploader:
                 "title": metadata["title"],
                 "description": metadata["description"],
                 "tags": metadata.get("tags", []),
-                "categoryId": self.config.get("category_id", "28"),
+                "categoryId": metadata.get("category_id") or self.config.get("category_id", "28"),
                 "defaultLanguage": self.config.get("default_language", "ja"),
             },
             "status": {

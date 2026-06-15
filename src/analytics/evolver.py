@@ -1,0 +1,200 @@
+"""
+Self-improvement engine.
+
+Analyzes video_log.json → writes strategy.json + evolves prompt_hints.json.
+
+strategy.json:
+  channel_weights       — 実績ベースのチャンネル重み
+  bgm_ranking           — 視聴維持率が高かったBGM順
+  thumbnail_style_score — サムネイルスタイル別CTR
+  avg_ctr / avg_retention — 全体平均
+
+prompt_hints.json:
+  top_title_patterns    — 高再生タイトルのパターン
+  hook_examples         — 高維持率動画の冒頭文
+  style_notes           — 改善メモ（次回のプロンプトに挿入）
+"""
+import json
+import logging
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_STRATEGY_FILE     = "data/strategy.json"
+_PROMPT_HINTS_FILE = "data/prompt_hints.json"
+_MIN_VIDEOS        = 3
+
+
+def _avg(values):
+    vals = [v for v in values if v is not None and v >= 0]
+    return round(sum(vals) / len(vals), 4) if vals else 0.0
+
+
+def run(log_file: str = "data/video_log.json"):
+    if not Path(log_file).exists():
+        logger.info("No video log — nothing to evolve.")
+        return
+
+    with open(log_file, "r", encoding="utf-8") as f:
+        records = json.load(f)
+
+    with_stats     = [r for r in records if r.get("views") is not None]
+    with_analytics = [r for r in records if r.get("ctr") is not None]
+
+    logger.info(f"Records: {len(records)} total, {len(with_stats)} with stats, {len(with_analytics)} with analytics")
+
+    if len(with_stats) < _MIN_VIDEOS:
+        logger.info(f"Need {_MIN_VIDEOS}+ videos with stats. Got {len(with_stats)}.")
+        return
+
+    # ── Channel weights (by views) ────────────────────────────────
+    ch_views = defaultdict(list)
+    ch_ctr   = defaultdict(list)
+    ch_ret   = defaultdict(list)
+    for r in with_stats:
+        ch = r.get("channel_id", "unknown")
+        ch_views[ch].append(r.get("views", 0))
+    for r in with_analytics:
+        ch = r.get("channel_id", "unknown")
+        if r.get("ctr"):      ch_ctr[ch].append(r["ctr"])
+        if r.get("avg_view_duration_sec"): ch_ret[ch].append(r["avg_view_duration_sec"])
+
+    avg_views  = {ch: _avg(v) for ch, v in ch_views.items()}
+    global_avg = _avg([v for vs in ch_views.values() for v in vs]) or 1.0
+    channel_weights = {
+        ch: round(min(2.0, max(0.2, avg / global_avg)), 3)
+        for ch, avg in avg_views.items()
+    }
+
+    # ── BGM ranking (by avg view duration = retention proxy) ──────
+    bgm_ret  = defaultdict(list)
+    bgm_view = defaultdict(list)
+    for r in with_stats:
+        bgm = r.get("bgm")
+        if bgm:
+            bgm_view[bgm].append(r.get("views", 0))
+    for r in with_analytics:
+        bgm = r.get("bgm")
+        if bgm and r.get("avg_view_duration_sec"):
+            bgm_ret[bgm].append(r["avg_view_duration_sec"])
+
+    # Prefer retention data; fallback to views
+    bgm_score = {}
+    for bgm in set(list(bgm_ret.keys()) + list(bgm_view.keys())):
+        if bgm in bgm_ret and bgm_ret[bgm]:
+            bgm_score[bgm] = _avg(bgm_ret[bgm])
+        else:
+            bgm_score[bgm] = _avg(bgm_view.get(bgm, [0])) / 100  # normalize
+    bgm_ranking = sorted(bgm_score.keys(), key=lambda b: bgm_score[b], reverse=True)
+
+    # ── Global averages ───────────────────────────────────────────
+    all_ctrs = [r["ctr"] for r in with_analytics if r.get("ctr")]
+    all_rets = [r["avg_view_duration_sec"] for r in with_analytics if r.get("avg_view_duration_sec")]
+    global_ctr = _avg(all_ctrs)
+    global_ret = _avg(all_rets)
+
+    # ── Insights ──────────────────────────────────────────────────
+    insights = []
+    for ch in sorted(channel_weights, key=lambda c: -channel_weights[c]):
+        w   = channel_weights[ch]
+        avg = round(avg_views.get(ch, 0))
+        ctr = round(_avg(ch_ctr.get(ch, [])) * 100, 2)
+        ret = round(_avg(ch_ret.get(ch, [])))
+        insights.append(f"[{ch}] views={avg} weight={w} CTR={ctr}% retention={ret}s")
+
+    top5 = sorted(with_stats, key=lambda r: r.get("views", 0), reverse=True)[:5]
+    if top5:
+        insights.append("Top 5 by views:")
+        for r in top5:
+            insights.append(f"  {r.get('views',0)}views CTR={round((r.get('ctr') or 0)*100,1)}% [{r.get('title','?')}]")
+
+    if bgm_ranking:
+        insights.append(f"Best BGM (retention): {bgm_ranking[0]}")
+
+    # ── Write strategy.json ───────────────────────────────────────
+    strategy = {
+        "updated_at":           datetime.now(timezone.utc).isoformat(),
+        "videos_analyzed":      len(with_stats),
+        "analytics_available":  len(with_analytics),
+        "channel_weights":      channel_weights,
+        "avg_views_per_channel": {ch: round(_avg(v)) for ch, v in ch_views.items()},
+        "avg_ctr_per_channel":  {ch: round(_avg(v)*100, 2) for ch, v in ch_ctr.items()},
+        "avg_retention_per_channel": {ch: round(_avg(v)) for ch, v in ch_ret.items()},
+        "global_avg_ctr_pct":   round(global_ctr * 100, 2),
+        "global_avg_retention_sec": round(global_ret),
+        "bgm_ranking":          bgm_ranking,
+        "bgm_score":            {b: round(s, 2) for b, s in bgm_score.items()},
+        "insights":             insights,
+    }
+    Path(_STRATEGY_FILE).parent.mkdir(parents=True, exist_ok=True)
+    with open(_STRATEGY_FILE, "w", encoding="utf-8") as f:
+        json.dump(strategy, f, ensure_ascii=False, indent=2)
+
+    # ── Write prompt_hints.json (for script prompt evolution) ─────
+    top10 = sorted(with_stats, key=lambda r: r.get("views", 0), reverse=True)[:10]
+    top_titles = [r.get("title", "") for r in top10 if r.get("title")]
+
+    # High-retention videos (top 30% by avg_view_duration)
+    retention_sorted = sorted(with_analytics, key=lambda r: r.get("avg_view_duration_sec", 0), reverse=True)
+    top_ret_titles = [r.get("title", "") for r in retention_sorted[:5] if r.get("title")]
+
+    # ── Title pattern analysis ────────────────────────────────────
+    # Extract bracket patterns from high-performing titles
+    import re
+    bracket_counts = defaultdict(int)
+    for r in top5:
+        m = re.search(r'【(.+?)】', r.get('title', ''))
+        if m:
+            bracket_counts[m.group(1)] += r.get('views', 1)
+    top_brackets = sorted(bracket_counts, key=lambda k: -bracket_counts[k])[:5]
+
+    # ── Build style notes ─────────────────────────────────────────
+    style_notes = []
+    if global_ctr > 0:
+        if global_ctr < 0.03:
+            style_notes.append("CTRが低い(< 3%)。サムネイルタイトルに具体的な数字・年号・金額を必ず入れる")
+            style_notes.append("サムネイルの文字数を減らし、大きく読みやすくする（12文字以内推奨）")
+        elif global_ctr < 0.05:
+            style_notes.append("CTRが改善余地あり(3-5%)。タイトルの冒頭【】に感情を動かす動詞を使う")
+        elif global_ctr > 0.07:
+            style_notes.append("CTRが高い(> 7%)。現在のタイトルスタイルは非常に効果的 — 維持する")
+
+    if global_ret > 0:
+        if global_ret < 45:
+            style_notes.append("視聴維持率が非常に低い(< 45s)。最初の5秒で核心的事実を言い切る。前置き禁止")
+            style_notes.append("動画の冒頭15秒でサムネイルの答えを出す（「釣り」は離脱を招く）")
+        elif global_ret < 80:
+            style_notes.append("視聴維持率を改善(< 80s)。中盤に新情報・驚きを追加し視聴者を引き留める")
+        elif global_ret > 150:
+            style_notes.append("視聴維持率が優秀(> 150s)。現在のスクリプト構成は効果的 — 維持する")
+
+    if top_brackets:
+        style_notes.append(f"高再生数タイトルの鉄板パターン: 【{'】【'.join(top_brackets[:3])}】")
+
+    # Shorts-specific insights
+    shorts_records = [r for r in with_stats if r.get('shorts_views') is not None]
+    if shorts_records:
+        avg_shorts_views = _avg([r['shorts_views'] for r in shorts_records])
+        avg_main_views   = _avg([r.get('views', 0) for r in with_stats])
+        if avg_shorts_views > avg_main_views * 5:
+            style_notes.append("Shortsの再生数が横動画の5倍以上 — Shorts投稿を優先する戦略が有効")
+
+    hints = {
+        "updated_at":           datetime.now(timezone.utc).isoformat(),
+        "top_titles_by_view":   top_titles,
+        "top_titles_by_retention": top_ret_titles,
+        "top_bracket_patterns": top_brackets,
+        "style_notes":          style_notes,
+        "global_ctr_pct":       round(global_ctr * 100, 2),
+        "global_retention_sec": round(global_ret),
+    }
+    with open(_PROMPT_HINTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(hints, f, ensure_ascii=False, indent=2)
+
+    logger.info("=== Strategy + PromptHints updated ===")
+    for line in insights:
+        logger.info(f"  {line}")
+    for note in style_notes:
+        logger.info(f"  [HINT] {note}")

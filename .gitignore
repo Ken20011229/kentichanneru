@@ -2,7 +2,6 @@ config/credentials/token.json
 config/credentials/client_secrets.json
 output/
 logs/
-assets/se/
 .env
 __pycache__/
 *.pyc
