@@ -28,7 +28,7 @@ jobs:
           restore-keys: autoposter-data-
 
       - name: Install system dependencies
-        run: sudo apt-get install -y ffmpeg p7zip-full
+        run: sudo apt-get update -y && sudo apt-get install -y ffmpeg p7zip-full
 
       - name: Cache VOICEVOX Engine
         id: cache-voicevox
