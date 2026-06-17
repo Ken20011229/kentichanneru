@@ -170,6 +170,15 @@ def run(log_file: str = "data/video_log.json"):
         elif global_ret > 150:
             style_notes.append("視聴維持率が優秀(> 150s)。現在のスクリプト構成は効果的 — 維持する")
 
+    # avg_view_percentage insight
+    all_pcts = [r["avg_view_percentage"] for r in with_analytics if r.get("avg_view_percentage")]
+    global_pct = _avg(all_pcts)
+    if global_pct > 0:
+        if global_pct < 30:
+            style_notes.append(f"平均視聴率が低い({global_pct:.0f}%)。動画の後半に情報を追加し離脱防止を強化する")
+        elif global_pct > 60:
+            style_notes.append(f"平均視聴率が高い({global_pct:.0f}%)。現在の構成は最後まで見られている — 維持する")
+
     if top_brackets:
         style_notes.append(f"高再生数タイトルの鉄板パターン: 【{'】【'.join(top_brackets[:3])}】")
 

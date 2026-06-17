@@ -65,10 +65,11 @@ def update_analytics(analytics_service, log_file: str = _DEFAULT_LOG):
         if vid and vid in analytics:
             a = analytics[vid]
             r.update({
-                "ctr":                  a.get("ctr", 0),
+                "ctr":                   a.get("ctr", 0),
                 "avg_view_duration_sec": a.get("avg_view_duration_sec", 0),
-                "watch_time_min":       a.get("watch_time_min", 0),
-                "analytics_updated_at": now,
+                "avg_view_percentage":   a.get("avg_view_percentage", 0),
+                "watch_time_min":        a.get("watch_time_min", 0),
+                "analytics_updated_at":  now,
             })
 
     _save(log_file, records)
