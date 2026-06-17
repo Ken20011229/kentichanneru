@@ -87,7 +87,26 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
 
         # Stage 3: Generate script and metadata
         writer = ClaudeScriptWriter(config["groq"])
-        script_data = writer.generate(item, channel=channel)
+        script_data = None
+        for _item_attempt in range(3):
+            try:
+                script_data = writer.generate(item, channel=channel)
+                break
+            except Exception as e:
+                logger.warning(f"Script generation failed for '{item['title']}': {e}")
+                next_item = fetch_and_select_item(config, dedup, channel=channel)
+                if not next_item:
+                    raise RuntimeError("No more items available after script failures") from e
+                dedup.mark_seen(next_item["id"])
+                item = next_item
+                if item.get("needs_translation"):
+                    translator = ClaudeTranslator(config["groq"])
+                    translated = translator.translate_batch([item["title"], item["summary"]])
+                    item["title"] = translated[0]
+                    item["summary"] = translated[1]
+                logger.info(f"Retrying with next item: '{item['title']}'")
+        if script_data is None:
+            raise RuntimeError("All item attempts exhausted without generating a script")
         logger.info(f"Script generated: '{script_data['title']}' ({len(script_data['script_segments'])} segments)")
 
         # Stage 4: TTS synthesis

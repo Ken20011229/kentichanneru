@@ -79,14 +79,14 @@ SCRIPT_PROMPT = """\
 }}
 
 ## script_segments について
-- セグメント数は内容に応じて自由に決める（目安 10〜20 文）
+- セグメント数は**最低8文**（目安 10〜20 文）。情報が少なくても背景・歴史・影響・今後の展望などで補完して必ず8文以上にすること
 - 各セグメントは句点「。」で終わる1文
 - 横動画は Shorts より深く掘り下げた内容にすること
 - tags は合計 12〜15 個（チャンネルタグ「{channel_name}」「ずんだもん」「VOICEVOX」を含める）
 
 ## shorts_script_segments について
 - Shorts だけで完結する独立した動画として構成する（合計 55 秒以内が目安）
-- セグメント数は内容に応じて 7〜12 文で自由に決める
+- セグメント数は**最低5文**（目安 7〜12 文）。情報が少なくても必ず5文以上にすること
 - 最後のセグメントは必ず「チャンネル登録と高評価をお願いします！」で締める
 
 ## visual_type の選び方（自由に選んでよい）
@@ -169,9 +169,9 @@ class ClaudeScriptWriter:
                     sseg["keyword"] = ""
                 if "text" not in sseg:
                     raise ValueError("shorts_script_segment missing 'text' field")
-            if len(shorts_segs) < 6:
+            if len(shorts_segs) < 4:
                 raise ValueError(
                     f"shorts_script_segments too short: {len(shorts_segs)} segments "
-                    f"(minimum 6 required). Retrying..."
+                    f"(minimum 4 required). Retrying..."
                 )
             logger.info(f"Shorts script: {len(shorts_segs)} segments")
