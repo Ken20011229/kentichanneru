@@ -445,6 +445,74 @@ def _slide_keyword(fp: str, text: str, keyword: str, accent: tuple,
     return canvas.convert("RGB")
 
 
+def _slide_image(fp: str, text: str, keyword: str, accent: tuple,
+                 section_num: int, badge_label: str,
+                 image_path: str = None,
+                 bg_image_path: str = None) -> Image.Image:
+    """IMAGE: AI-generated illustration fills the frame; text overlaid at bottom."""
+    # Use segment image if available, else fall back to background image
+    src = image_path if (image_path and Path(image_path).exists()) else None
+
+    if src:
+        try:
+            img = Image.open(src).convert("RGBA")
+            ir  = img.width / img.height
+            cr  = W / H
+            nw  = int(H * ir) if ir > cr else W
+            nh  = H if ir > cr else int(W / ir)
+            img = img.resize((nw, nh), Image.LANCZOS)
+            left, top = (nw - W) // 2, (nh - H) // 2
+            canvas = img.crop((left, top, left + W, top + H))
+        except Exception as e:
+            logger.warning(f"Segment image load failed: {e}")
+            canvas = _make_bg(bg_image_path)
+    else:
+        canvas = _make_bg(bg_image_path)
+
+    # Dark gradient over bottom 45% for text readability
+    grad = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd   = ImageDraw.Draw(grad)
+    grad_top = int(H * 0.55)
+    for y in range(grad_top, H):
+        t = (y - grad_top) / (H - grad_top)
+        gd.line([(0, y), (W, y)], fill=(0, 0, 0, int(210 * t ** 1.4)))
+    canvas = Image.alpha_composite(canvas, grad)
+
+    draw = ImageDraw.Draw(canvas)
+
+    # Section badge (top-left)
+    _draw_section_badge(draw, fp, accent, section_num, badge_label)
+
+    # Keyword in accent color, top-center
+    if keyword:
+        font_kw = _font(fp, 72)
+        kw_w    = _tw(draw, keyword, font_kw)
+        kw_x    = (W - kw_w) // 2
+        draw.text((kw_x, 112), keyword, font=font_kw, fill=(*accent, 255),
+                  stroke_width=4, stroke_fill=(0, 0, 0))
+
+    # Narration text at bottom (white + black stroke)
+    max_w = W - 120
+    font_text, text_lines = _font(fp, 32), [text]
+    for size in (58, 50, 44, 38, 32):
+        ft    = _font(fp, size)
+        ls    = _wrap_px(draw, text, ft, max_w)
+        lh    = max((_th(draw, ln, ft) for ln in ls), default=size) + 14
+        if lh * len(ls) < H * 0.28:
+            font_text, text_lines = ft, ls
+            break
+
+    lh    = max((_th(draw, ln, font_text) for ln in text_lines), default=38) + 14
+    ty    = H - 72 - lh * len(text_lines)
+    for ln in text_lines:
+        draw.text((60, ty), ln, font=font_text, fill=(255, 255, 255, 255),
+                  stroke_width=5, stroke_fill=(0, 0, 0))
+        ty += lh
+
+    draw.rectangle([(0, H - 6), (W, H)], fill=(*accent, 255))
+    return canvas.convert("RGB")
+
+
 def _slide_detail(fp: str, text: str, keyword: str, accent: tuple,
                   section_num: int, badge_label: str,
                   right_path: str, left_path: str,
@@ -487,6 +555,7 @@ def generate_slides(
     config: dict,
     output_dir: str,
     bg_image_path: str = None,
+    segment_images: dict[int, str] | None = None,
 ) -> list[str]:
     """Generate one 1920×1080 slide image per segment. Returns list of paths."""
     os.makedirs(output_dir, exist_ok=True)
@@ -522,8 +591,15 @@ def generate_slides(
 
         logger.debug(f"Slide {idx}: [{sec_num}]{slide_label} type={visual_type!r} kw={keyword!r}")
 
+        seg_img = (segment_images or {}).get(idx)
+
         try:
-            if visual_type == "intro":
+            if visual_type == "image":
+                img = _slide_image(fp, text, keyword, accent,
+                                   sec_num, slide_label,
+                                   image_path=seg_img,
+                                   bg_image_path=bg_image_path)
+            elif visual_type == "intro":
                 img = _slide_intro(fp, title, text, accent,
                                    sec_num, slide_label, right_path, left_path,
                                    bg_image_path=bg_image_path)

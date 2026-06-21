@@ -33,6 +33,18 @@ class HuggingFaceImageClient:
         resp.raise_for_status()
         return resp.content
 
+    def generate_image(self, prompt: str, output_path: str) -> str | None:
+        """Generate a single image to output_path. Returns path or None on failure."""
+        try:
+            image_bytes = self.generate(prompt)
+            with open(output_path, "wb") as f:
+                f.write(image_bytes)
+            logger.info(f"HuggingFace image saved: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.warning(f"HuggingFace single image failed: {e}")
+            return None
+
     def fetch_images_for_keywords(self, keywords: list[str], output_dir: str, total: int = 1) -> list[str]:
         os.makedirs(output_dir, exist_ok=True)
         paths = []

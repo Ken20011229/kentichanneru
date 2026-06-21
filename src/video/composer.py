@@ -139,26 +139,47 @@ def render_video(
 
     parts = []
 
+    # Ken Burns patterns: (scale, x_dir, y_dir)
+    # x_dir: 'r'=right→left, 'l'=left→right, 'c'=center
+    # y_dir: 'd'=down→up,    'u'=up→down,    'c'=center
+    _KB_PATTERNS = [
+        (1.06, 'r', 'c'),   # zoom+pan right
+        (1.05, 'l', 'c'),   # zoom+pan left
+        (1.07, 'c', 'd'),   # zoom+pan down→up
+        (1.04, 'r', 'd'),   # zoom+diagonal
+        (1.06, 'l', 'u'),   # zoom+diagonal reverse
+        (1.05, 'c', 'u'),   # zoom+pan up→down
+        (1.08, 'r', 'u'),   # strong zoom+diagonal
+        (1.04, 'l', 'd'),   # gentle zoom+diagonal
+    ]
+
     for i in range(n):
         if per_slide_durations:
-            # Subtle Ken Burns: 2% scale-up then horizontal pan
-            dur_i = per_slide_durations[i]
-            KB = 1.02
-            kb_i_w = int(int(res_w) * KB / 2) * 2
-            kb_i_h = int(int(res_h) * KB / 2) * 2
-            ox = (kb_i_w - int(res_w)) // 2
-            oy = (kb_i_h - int(res_h)) // 2
+            dur_i    = per_slide_durations[i]
+            KB, xd, yd = _KB_PATTERNS[i % len(_KB_PATTERNS)]
+            kb_i_w   = int(int(res_w) * KB / 2) * 2
+            kb_i_h   = int(int(res_h) * KB / 2) * 2
+            ox       = (kb_i_w - int(res_w)) // 2
+            oy       = (kb_i_h - int(res_h)) // 2
             safe_dur = max(dur_i, 0.1)
-            if i % 2 == 0:
-                x_expr = f"'{ox}*(1-min(t,{safe_dur:.2f})/{safe_dur:.2f})'"
-            else:
-                x_expr = f"'{ox}*min(t,{safe_dur:.2f})/{safe_dur:.2f}'"
+            t_norm   = f"min(t,{safe_dur:.2f})/{safe_dur:.2f}"
+
+            x_expr = (
+                f"'{ox}*(1-{t_norm})'" if xd == 'r' else
+                f"'{ox}*{t_norm}'"     if xd == 'l' else
+                f"'{ox}'"
+            )
+            y_expr = (
+                f"'{oy}*(1-{t_norm})'" if yd == 'd' else
+                f"'{oy}*{t_norm}'"     if yd == 'u' else
+                f"'{oy}'"
+            )
             parts.append(
                 f"[{i}:v]"
                 f"scale={kb_i_w}:{kb_i_h}:force_original_aspect_ratio=increase,"
                 f"crop={kb_i_w}:{kb_i_h},"
                 f"fps={fps},"
-                f"crop={res_w}:{res_h}:x={x_expr}:y='{oy}',"
+                f"crop={res_w}:{res_h}:x={x_expr}:y={y_expr},"
                 f"setsar=1"
                 f"[v{i}]"
             )

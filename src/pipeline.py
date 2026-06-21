@@ -167,7 +167,38 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
 
         bg_image_path = image_paths[0] if image_paths else None
 
-        # Stage 5.5: Generate slides (one per script segment — replaces Pexels for video body)
+        # Stage 5.5a: Generate per-segment AI images for "image" visual_type segments
+        segment_images: dict[int, str] = {}
+        hf_cfg = config["images"].get("huggingface", {})
+        if hf_cfg.get("enabled") and os.environ.get("HF_TOKEN"):
+            from src.images.huggingface_client import HuggingFaceImageClient
+            hf_gen = HuggingFaceImageClient(os.environ["HF_TOKEN"])
+            image_segs = [
+                (i, seg) for i, seg in enumerate(script_data["script_segments"])
+                if seg.get("visual_type") == "image" and seg.get("image_prompt", "").strip()
+            ]
+            for idx, seg in image_segs[:3]:  # limit to 3 to conserve HF quota
+                prompt   = seg["image_prompt"]
+                out_path = os.path.join(image_dir, f"seg_{idx:03d}.jpg")
+                result   = hf_gen.generate_image(prompt, out_path)
+                if result:
+                    segment_images[idx] = result
+                    logger.info(f"Segment {idx} image generated: {prompt[:60]}")
+
+        # Stage 5.5b: Auto-fetch BGM from Freesound based on LLM-selected mood
+        bgm_mood = script_data.get("bgm_mood", "neutral")
+        if os.environ.get("FREESOUND_API_KEY"):
+            try:
+                from src.bgm.bgm_fetcher import FreesoundBGMFetcher
+                fetcher      = FreesoundBGMFetcher(os.environ["FREESOUND_API_KEY"])
+                fetched_bgm  = fetcher.fetch_bgm(bgm_mood)
+                if fetched_bgm:
+                    bgm_files = [fetched_bgm] + bgm_files
+                    logger.info(f"BGM fetched for mood '{bgm_mood}': {fetched_bgm}")
+            except Exception as e:
+                logger.warning(f"BGM fetch failed: {e}")
+
+        # Stage 5.5c: Generate slides (one per script segment)
         from src.video.slide_gen import generate_slides
         slide_dir = os.path.join(work_dir, "slides")
         os.makedirs(slide_dir, exist_ok=True)
@@ -181,6 +212,7 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
             config=config,
             output_dir=slide_dir,
             bg_image_path=bg_image_path,
+            segment_images=segment_images,
         )
         per_slide_durations = [s["duration_sec"] for s in audio_segments]
 

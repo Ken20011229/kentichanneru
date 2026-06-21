@@ -65,8 +65,10 @@ SCRIPT_PROMPT = """\
   "title": "動画タイトル（30文字以内、クリックしたくなる表現。形式は自由）",
   "description": "YouTube説明欄（400〜500文字）。冒頭にキーワードを自然に含め、内容のポイント・背景・呼びかけ・ハッシュタグ10個を含める。",
   "tags": ["タグ1", ...],
+  "bgm_mood": "calm",
   "script_segments": [
     {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード（10文字以内。なければ空文字）", "visual_type": "intro", "animation_style": "scale_intro"}},
+    {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード", "visual_type": "image", "animation_style": "fade", "image_prompt": "A detailed English prompt for FLUX image generation"}},
     ...
   ],
   "shorts_script_segments": [
@@ -89,6 +91,19 @@ SCRIPT_PROMPT = """\
 - セグメント数は**最低5文**（目安 7〜12 文）。情報が少なくても必ず5文以上にすること
 - 最後のセグメントは必ず「チャンネル登録と高評価をお願いします！」で締める
 
+## bgm_mood の選び方（動画全体の雰囲気に合わせて1つ選ぶ）
+| 値 | 雰囲気 |
+|---|---|
+| "upbeat" | 明るく前向き・テンポよい |
+| "calm" | 穏やか・落ち着いた解説 |
+| "tense" | 緊張感・サスペンス系 |
+| "inspiring" | 感動的・希望ある未来 |
+| "neutral" | 中立・汎用 |
+| "epic" | 壮大・歴史・宇宙 |
+| "tech" | テクノロジー・AI・未来 |
+| "news" | ニュース・報道 |
+| "science" | 科学・研究・発見 |
+
 ## visual_type の選び方（自由に選んでよい）
 | 値 | 画面上での見え方 | 使うタイミングの例 |
 |---|---|---|
@@ -96,6 +111,14 @@ SCRIPT_PROMPT = """\
 | "keyword" | アクセントカラーの背景ボックス＋白文字 | キーワード・概念を強調したいとき |
 | "point" | アクセントカラーの縁取り＋下からスライドイン | 重要ポイント・まとめ文 |
 | "detail" | シンプルな白文字＋暗い縁取り | 通常の解説・背景説明 |
+| "image" | AI生成イラストがフルフレームで表示、テキスト下部オーバーレイ | 視覚的に印象づけたい重要な場面（全体の20〜30%推奨） |
+
+## image_prompt の書き方（visual_type が "image" のセグメントのみ必須）
+- 必ず英語で書く
+- FLUX画像生成AIへの具体的な指示文（シーン・構図・雰囲気・スタイルを含める）
+- 例: "futuristic data center with glowing servers, cinematic blue lighting, photorealistic 4k"
+- 例: "scientist examining DNA structure, laboratory setting, dramatic lighting, hyperrealistic"
+- 抽象的すぎず、ニュースの内容を視覚的に表現するものにする
 
 ## animation_style の選び方（省略可。省略時は visual_type に応じて自動決定）
 動画の雰囲気に合わせてセグメントごとに字幕テキストの登場アニメーションを指定できる。
@@ -166,7 +189,11 @@ class ClaudeScriptWriter:
             raise ValueError(f"Too few script_segments: {len(segments)} (minimum 8 required)")
         if len(segments) < 12:
             logger.warning(f"script_segments below target: {len(segments)} (target 12-20)")
-        valid_vtypes = {"intro", "point", "keyword", "detail"}
+        valid_vtypes = {"intro", "point", "keyword", "detail", "image"}
+        valid_moods  = {"upbeat","calm","tense","inspiring","neutral","sad","epic","tech","news","science"}
+        if data.get("bgm_mood") not in valid_moods:
+            data["bgm_mood"] = "neutral"
+
         valid_anims  = {
             "fade", "scale_in", "scale_intro", "pop", "bounce",
             "blur_in", "glow_in", "spin_in",
@@ -184,6 +211,9 @@ class ClaudeScriptWriter:
             # Remove invalid animation_style so subtitle_gen uses its default
             if seg.get("animation_style") not in valid_anims:
                 seg.pop("animation_style", None)
+            # image type requires image_prompt; strip empty ones
+            if seg["visual_type"] == "image" and not seg.get("image_prompt", "").strip():
+                seg["visual_type"] = "detail"
         # Force first segment to intro regardless of LLM output
         segments[0]["visual_type"] = "intro"
 
