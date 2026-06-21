@@ -66,7 +66,7 @@ SCRIPT_PROMPT = """\
   "description": "YouTube説明欄（400〜500文字）。冒頭にキーワードを自然に含め、内容のポイント・背景・呼びかけ・ハッシュタグ10個を含める。",
   "tags": ["タグ1", ...],
   "script_segments": [
-    {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード（10文字以内。なければ空文字）", "visual_type": "intro"}},
+    {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード（10文字以内。なければ空文字）", "visual_type": "intro", "animation_style": "scale_intro"}},
     ...
   ],
   "shorts_script_segments": [
@@ -96,6 +96,27 @@ SCRIPT_PROMPT = """\
 | "keyword" | アクセントカラーの背景ボックス＋白文字 | キーワード・概念を強調したいとき |
 | "point" | アクセントカラーの縁取り＋下からスライドイン | 重要ポイント・まとめ文 |
 | "detail" | シンプルな白文字＋暗い縁取り | 通常の解説・背景説明 |
+
+## animation_style の選び方（省略可。省略時は visual_type に応じて自動決定）
+動画の雰囲気に合わせてセグメントごとに字幕テキストの登場アニメーションを指定できる。
+バリエーションを豊富に使い、同じ animation_style が連続しないよう意識すること。
+
+| 値 | 効果 | 向いている場面 |
+|---|---|---|
+| "fade" | シンプルなフェードイン | 落ち着いた解説、締め |
+| "scale_in" | ゆっくりズームイン（82%→100%） | 標準的な強調 |
+| "scale_intro" | 大きめズームイン（88%→100%） | 冒頭・タイトル |
+| "pop" | 瞬間的に弾けて登場（60%→112%→100%） | 驚き・数字の発表 |
+| "bounce" | 跳ねながら落ち着く（90%→106%→100%） | 勢いのある主張 |
+| "blur_in" | ぼかしからシャープに | 謎・技術・調査結果 |
+| "glow_in" | 光のにじみから登場 | 感動・発見・美しい事実 |
+| "spin_in" | 軽く回転して正位置に収まる | 転換点・意外な展開 |
+| "slide_up" | 画面下から上へスライド | 重要ポイント・強調 |
+| "slide_down" | 画面上から下へ落下 | 警告・注意・落とし穴 |
+| "slide_left" | 右端からスライドイン | テンポよく続く内容 |
+| "slide_right" | 左端からスライドイン | 場面転換・視点の切り替え |
+| "float_up" | ゆっくり浮かび上がる | 余韻・締め・感情的な場面 |
+| "snap" | 瞬間的にパッと現れる | 短い情報・箇条書き的な説明 |
 """
 
 
@@ -146,6 +167,12 @@ class ClaudeScriptWriter:
         if len(segments) < 12:
             logger.warning(f"script_segments below target: {len(segments)} (target 12-20)")
         valid_vtypes = {"intro", "point", "keyword", "detail"}
+        valid_anims  = {
+            "fade", "scale_in", "scale_intro", "pop", "bounce",
+            "blur_in", "glow_in", "spin_in",
+            "slide_up", "slide_down", "slide_left", "slide_right",
+            "float_up", "snap",
+        }
         for seg in segments:
             if "text" not in seg:
                 raise ValueError("script_segment missing 'text' field")
@@ -154,6 +181,9 @@ class ClaudeScriptWriter:
                 seg["keyword"] = ""
             if "visual_type" not in seg or seg["visual_type"] not in valid_vtypes:
                 seg["visual_type"] = "detail"
+            # Remove invalid animation_style so subtitle_gen uses its default
+            if seg.get("animation_style") not in valid_anims:
+                seg.pop("animation_style", None)
         # Force first segment to intro regardless of LLM output
         segments[0]["visual_type"] = "intro"
 

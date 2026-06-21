@@ -17,10 +17,9 @@ def _make_header(accent_rgb: tuple, channel_name: str = "NEWS") -> str:
     lg = min(255, g + 70)
     lb = min(255, b + 70)
 
-    # ASS colors
-    accent_outline = _ass_color(r, g, b)           # Point: accent outline
-    accent_box     = _ass_color(r, g, b, 0x10)     # Keyword: accent bg box (nearly opaque)
-    accent_text    = _ass_color(lr, lg, lb)         # Intro text + Banner text
+    accent_outline = _ass_color(r, g, b)
+    accent_box     = _ass_color(r, g, b, 0x10)
+    accent_text    = _ass_color(lr, lg, lb)
     banner_box     = "&H99201810"
 
     return f"""\
@@ -74,32 +73,72 @@ def _escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{")
 
 
+# ── Animation tag library ──────────────────────────────────────────────────────
+# Each value is an ASS override tag block that controls entrance/exit animation.
+# PlayRes: 1920×1080, default text anchor bottom-center (Y=992 at MarginV=88).
+
+_ANIM_TAGS: dict[str, str] = {
+    # Simple fade — most legible
+    "fade":        "{\\fad(220,160)}",
+    # Scale zoom-in from 82% — smooth focus
+    "scale_in":    "{\\fscx82\\fscy82\\fad(260,160)\\t(0,400,\\fscx100\\fscy100)}",
+    # Scale up intro — current default for first segment
+    "scale_intro": "{\\fscx88\\fscy88\\fad(320,180)\\t(0,440,\\fscx100\\fscy100)}",
+    # Quick pop: shoots past 112% then settles — energetic
+    "pop":         "{\\fscx60\\fscy60\\fad(80,160)\\t(0,200,\\fscx112\\fscy112)\\t(200,370,\\fscx100\\fscy100)}",
+    # Elastic bounce: 106% overshoot then settle — bold emphasis
+    "bounce":      "{\\fscx90\\fscy90\\fad(180,150)\\t(0,250,\\fscx106\\fscy106)\\t(250,420,\\fscx100\\fscy100)}",
+    # Blur sharpen: cinematic reveal from out-of-focus
+    "blur_in":     "{\\blur12\\fad(300,160)\\t(0,460,\\blur0)}",
+    # Light blur glow dissolve — softer reveal
+    "glow_in":     "{\\blur6\\fad(280,160)\\t(0,480,\\blur0)}",
+    # Slight CW spin then straighten — dramatic flair
+    "spin_in":     "{\\frz-8\\fscx88\\fscy88\\fad(200,140)\\t(0,380,\\frz0\\fscx100\\fscy100)}",
+    # Slide up from below screen — punchy
+    "slide_up":    "{\\move(960,1250,960,992,0,320)\\fad(160,130)}",
+    # Drop from above screen
+    "slide_down":  "{\\move(960,-150,960,992,0,320)\\fad(160,130)}",
+    # Wipe in from right edge
+    "slide_left":  "{\\move(2100,992,960,992,0,320)\\fad(160,130)}",
+    # Wipe in from left edge
+    "slide_right": "{\\move(-300,992,960,992,0,320)\\fad(160,130)}",
+    # Float up slowly — calm / narrative
+    "float_up":    "{\\move(960,1060,960,992,0,540)\\fad(300,150)}",
+    # Typewriter-like: fast fade in with slight scale — snappy reveal
+    "snap":        "{\\fscx95\\fscy95\\fad(60,160)\\t(0,120,\\fscx100\\fscy100)}",
+}
+
+# Visual-type default animations when LLM does not specify animation_style
+_DEFAULT_ANIM: dict[str, str] = {
+    "intro":   "scale_intro",
+    "keyword": "scale_in",
+    "point":   "slide_up",
+    "detail":  "fade",
+}
+
+
 def _format_event(start: str, end: str, text: str,
-                  visual_type: str, is_first: bool) -> str:
+                  visual_type: str, is_first: bool,
+                  animation_style: str = None) -> str:
     """Build one ASS Dialogue line with per-type style and animation."""
     lines = _split_lines(text)
     body  = "\\N".join(_escape(ln) for ln in lines)
 
+    # Style selection
     if is_first:
-        # First segment: large accent text on dark box, scale-in from 88%
         style = "Intro"
-        tags  = "{\\fscx88\\fscy88\\fad(320,180)\\t(0,440,\\fscx100\\fscy100)}"
-
     elif visual_type == "keyword":
-        # Keyword: white on accent-colored box, scale-in, padding spaces
         style = "Keyword"
-        body  = "　" + body + "　"   # visual padding inside box
-        tags  = "{\\fscx84\\fscy84\\fad(260,160)\\t(0,380,\\fscx100\\fscy100)}"
-
+        body  = "　" + body + "　"
     elif visual_type == "point":
-        # Point: accent-outlined text, slides up from below
         style = "Point"
-        tags  = "{\\move(960,1220,960,992,0,300)\\fad(160,120)}"
-
     else:
-        # Detail: standard dark-haloed text, simple fade
         style = "Detail"
-        tags  = "{\\fad(200,150)}"
+
+    # Animation selection: LLM choice > visual_type default
+    anim_key = animation_style if (animation_style and animation_style in _ANIM_TAGS) \
+               else _DEFAULT_ANIM.get("intro" if is_first else visual_type, "fade")
+    tags = _ANIM_TAGS[anim_key]
 
     return f"Dialogue: 0,{start},{end},{style},,0,0,0,,{tags}{body}"
 
@@ -115,7 +154,6 @@ def generate_ass(segments: list[dict], output_path: str, channel: dict = None) -
     vid_end     = _to_ass_time(total_dur)
     today       = date.today().strftime("%Y.%m.%d")
 
-    # Persistent top-corner branding
     lines.append(f"Dialogue: 0,0:00:00.00,{vid_end},Banner_L,,0,0,0,,{chan_name}")
     lines.append(f"Dialogue: 0,0:00:00.00,{vid_end},Banner_R,,0,0,0,,{today}")
 
@@ -128,6 +166,7 @@ def generate_ass(segments: list[dict], output_path: str, channel: dict = None) -
             seg["text"],
             seg.get("visual_type", "detail"),
             is_first=(i == 0),
+            animation_style=seg.get("animation_style"),
         ))
         cursor += seg["duration_sec"]
 
@@ -144,7 +183,7 @@ def generate_shorts_ass(segments: list[dict], output_path: str,
     ch     = channel or {}
     accent = tuple(ch.get("accent_color", [50, 200, 80]))
     r, g, b = accent
-    dark_box = _ass_color(r // 4, g // 4, b // 4, 0x22)   # very dark tinted box
+    dark_box = _ass_color(r // 4, g // 4, b // 4, 0x22)
 
     header = f"""\
 [Script Info]
@@ -162,6 +201,18 @@ Style: Hook,Noto Sans CJK JP,96,{_ass_color(r, g, b)},&H99000000,{dark_box},-1,0
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    # Shorts-specific animation pool (varied per segment index)
+    _SHORTS_ANIMS = [
+        "{\\fscx88\\fscy88\\fad(220,140)\\t(0,320,\\fscx100\\fscy100)}",   # scale_in
+        "{\\move(540,2000,540,1780,0,300)\\fad(160,130)}",                  # slide_up (PlayRes 1080×1920)
+        "{\\fscx65\\fscy65\\fad(80,150)\\t(0,200,\\fscx110\\fscy110)\\t(200,360,\\fscx100\\fscy100)}",  # pop
+        "{\\blur10\\fad(280,140)\\t(0,420,\\blur0)}",                       # blur_in
+        "{\\fscx92\\fscy92\\fad(180,140)\\t(0,240,\\fscx106\\fscy106)\\t(240,400,\\fscx100\\fscy100)}", # bounce
+        "{\\frz-6\\fscx88\\fscy88\\fad(200,140)\\t(0,360,\\frz0\\fscx100\\fscy100)}",                  # spin_in
+        "{\\move(1200,1780,540,1780,0,300)\\fad(150,130)}",                 # slide_left
+        "{\\fad(60,150)\\fscx96\\fscy96\\t(0,120,\\fscx100\\fscy100)}",    # snap
+    ]
+
     event_lines = [header.rstrip()]
     cursor = 0.0
 
@@ -174,10 +225,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         body   = "\\N".join(
             _escape(ln) for ln in _split_lines(seg["text"], max_chars=16)
         )
-        # First 2 segments use Hook style (accent-colored text); rest use Main
         style = "Hook" if i < 2 else "Main"
-        # Scale-in animation for every segment
-        tags  = "{\\fscx88\\fscy88\\fad(220,140)\\t(0,320,\\fscx100\\fscy100)}"
+
+        # Use LLM-specified animation if available, else cycle through pool
+        anim_key = seg.get("animation_style")
+        if anim_key and anim_key in _ANIM_TAGS:
+            tags = _ANIM_TAGS[anim_key]
+        else:
+            tags = _SHORTS_ANIMS[i % len(_SHORTS_ANIMS)]
+
         event_lines.append(f"Dialogue: 0,{start},{end},{style},,0,0,0,,{tags}{body}")
         cursor += seg["duration_sec"]
 

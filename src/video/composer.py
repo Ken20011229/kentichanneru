@@ -128,8 +128,14 @@ def render_video(
         inputs += ["-loop", "1", "-t", str(total_dur + 1), "-i", character_path]
 
     # ── Step 5: Build filter_complex ─────────────────────────────
-    # Transition playlist: professional-looking variety
-    _TRANSITIONS = ["fade", "wipeleft", "wiperight", "slideleft", "slideright"]
+    # Transition playlist: varied professional effects
+    _TRANSITIONS = [
+        "fade", "wipeleft", "wiperight", "slideleft", "slideright",
+        "circleopen", "circleclose", "dissolve", "fadeblack",
+        "smoothleft", "smoothright", "smoothup", "smoothdown",
+        "diagtl", "diagbr", "radial", "pixelize",
+        "horzopen", "horzclose", "vertopen", "vertclose",
+    ]
 
     parts = []
 
