@@ -65,7 +65,6 @@ SCRIPT_PROMPT = """\
   "title": "動画タイトル（30文字以内、クリックしたくなる表現。形式は自由）",
   "description": "YouTube説明欄（400〜500文字）。冒頭にキーワードを自然に含め、内容のポイント・背景・呼びかけ・ハッシュタグ10個を含める。",
   "tags": ["タグ1", ...],
-  "bgm_mood": "calm",
   "script_segments": [
     {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード（10文字以内。なければ空文字）", "visual_type": "intro", "animation_style": "scale_intro"}},
     {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード", "visual_type": "image", "animation_style": "fade", "image_prompt": "A detailed English prompt for FLUX image generation"}},
@@ -90,19 +89,6 @@ SCRIPT_PROMPT = """\
 - Shorts だけで完結する独立した動画として構成する（合計 55 秒以内が目安）
 - セグメント数は**最低5文**（目安 7〜12 文）。情報が少なくても必ず5文以上にすること
 - 最後のセグメントは必ず「チャンネル登録と高評価をお願いします！」で締める
-
-## bgm_mood の選び方（動画全体の雰囲気に合わせて1つ選ぶ）
-| 値 | 雰囲気 |
-|---|---|
-| "upbeat" | 明るく前向き・テンポよい |
-| "calm" | 穏やか・落ち着いた解説 |
-| "tense" | 緊張感・サスペンス系 |
-| "inspiring" | 感動的・希望ある未来 |
-| "neutral" | 中立・汎用 |
-| "epic" | 壮大・歴史・宇宙 |
-| "tech" | テクノロジー・AI・未来 |
-| "news" | ニュース・報道 |
-| "science" | 科学・研究・発見 |
 
 ## visual_type の選び方（自由に選んでよい）
 | 値 | 画面上での見え方 | 使うタイミングの例 |
@@ -190,10 +176,6 @@ class ClaudeScriptWriter:
         if len(segments) < 12:
             logger.warning(f"script_segments below target: {len(segments)} (target 12-20)")
         valid_vtypes = {"intro", "point", "keyword", "detail", "image"}
-        valid_moods  = {"upbeat","calm","tense","inspiring","neutral","sad","epic","tech","news","science"}
-        if data.get("bgm_mood") not in valid_moods:
-            data["bgm_mood"] = "neutral"
-
         valid_anims  = {
             "fade", "scale_in", "scale_intro", "pop", "bounce",
             "blur_in", "glow_in", "spin_in",

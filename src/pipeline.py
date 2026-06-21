@@ -185,19 +185,6 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
                     segment_images[idx] = result
                     logger.info(f"Segment {idx} image generated: {prompt[:60]}")
 
-        # Stage 5.5b: Auto-fetch BGM from Freesound based on LLM-selected mood
-        bgm_mood = script_data.get("bgm_mood", "neutral")
-        if os.environ.get("FREESOUND_API_KEY"):
-            try:
-                from src.bgm.bgm_fetcher import FreesoundBGMFetcher
-                fetcher      = FreesoundBGMFetcher(os.environ["FREESOUND_API_KEY"])
-                fetched_bgm  = fetcher.fetch_bgm(bgm_mood)
-                if fetched_bgm:
-                    bgm_files = [fetched_bgm] + bgm_files
-                    logger.info(f"BGM fetched for mood '{bgm_mood}': {fetched_bgm}")
-            except Exception as e:
-                logger.warning(f"BGM fetch failed: {e}")
-
         # Stage 5.5c: Generate slides (one per script segment)
         from src.video.slide_gen import generate_slides
         slide_dir = os.path.join(work_dir, "slides")
