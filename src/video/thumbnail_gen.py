@@ -167,8 +167,30 @@ def generate_thumbnail(
     right_path = char_cfg.get("image_path", "")
     left_path  = char_cfg.get("left_image_path", "")
 
-    # ── 1. Dark background with bokeh ────────────────────────────
-    canvas = _make_dark_bg(W, H, accent)
+    # ── 1. Background: photo if available, else dark bokeh ───────
+    if background_image_path and Path(background_image_path).exists():
+        img = Image.open(background_image_path).convert("RGBA")
+        ir = img.width / img.height
+        cr = W / H
+        if ir > cr:
+            nw, nh = int(H * ir), H
+        else:
+            nw, nh = W, int(W / ir)
+        img = img.resize((nw, nh), Image.LANCZOS)
+        left, top = (nw - W) // 2, (nh - H) // 2
+        img = img.crop((left, top, left + W, top + H))
+        img = img.filter(ImageFilter.GaussianBlur(radius=6))
+        overlay = Image.new("RGBA", (W, H), (8, 10, 20, 185))
+        canvas = Image.alpha_composite(img, overlay)
+        # Add bokeh glow on top for cinematic feel
+        for rx, ry, r, color in _BOKEH_DARK:
+            blob = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            d = ImageDraw.Draw(blob)
+            cx_b, cy_b = int(W * rx), int(H * ry)
+            d.ellipse([(cx_b - r, cy_b - r), (cx_b + r, cy_b + r)], fill=color)
+            canvas = Image.alpha_composite(canvas, blob.filter(ImageFilter.GaussianBlur(r // 1.4)))
+    else:
+        canvas = _make_dark_bg(W, H, accent)
 
     # ── 2. Both characters on right half ─────────────────────────
     canvas, char_inner_x = _paste_chars_dark(canvas, right_path, left_path, W, H)

@@ -133,17 +133,28 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
             except Exception as e:
                 logger.warning(f"Shorts TTS failed (will use truncated main audio): {e}")
 
-        # Stage 5: Fetch 1 image (for thumbnail background only)
+        # Stage 5: Generate/fetch 1 background image (for thumbnail + slide backgrounds)
         keywords = script_data.get("image_search_keywords", ["news"])
         image_dir = os.path.join(work_dir, "images")
         os.makedirs(image_dir, exist_ok=True)
 
         image_paths = []
-        pexels_cfg = config["images"].get("pexels", {})
-        if pexels_cfg.get("enabled") and os.environ.get("PEXELS_API_KEY"):
-            pexels = PexelsClient(os.environ["PEXELS_API_KEY"])
-            image_paths = pexels.fetch_images_for_keywords(keywords, image_dir, total=1)
 
+        # Primary: HuggingFace AI image generation
+        hf_cfg = config["images"].get("huggingface", {})
+        if hf_cfg.get("enabled") and os.environ.get("HF_TOKEN"):
+            from src.images.huggingface_client import HuggingFaceImageClient
+            hf = HuggingFaceImageClient(os.environ["HF_TOKEN"])
+            image_paths = hf.fetch_images_for_keywords(keywords, image_dir, total=1)
+
+        # Fallback: Pexels stock photos
+        if not image_paths:
+            pexels_cfg = config["images"].get("pexels", {})
+            if pexels_cfg.get("enabled") and os.environ.get("PEXELS_API_KEY"):
+                pexels = PexelsClient(os.environ["PEXELS_API_KEY"])
+                image_paths = pexels.fetch_images_for_keywords(keywords, image_dir, total=1)
+
+        # Fallback: Unsplash
         if not image_paths:
             unsplash_cfg = config["images"].get("unsplash", {})
             if unsplash_cfg.get("enabled") and os.environ.get("UNSPLASH_ACCESS_KEY"):
@@ -151,15 +162,10 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
                 image_paths = unsplash.fetch_images_for_keywords(keywords, image_dir, total=1)
 
         if not image_paths:
-            hf_cfg = config["images"].get("huggingface", {})
-            if hf_cfg.get("enabled") and os.environ.get("HF_TOKEN"):
-                from src.images.huggingface_client import HuggingFaceImageClient
-                hf = HuggingFaceImageClient(os.environ["HF_TOKEN"])
-                image_paths = hf.fetch_images_for_keywords(keywords, image_dir, total=1)
-
-        if not image_paths:
             logger.warning("No images from APIs, generating fallback gradient for thumbnail")
             image_paths = generate_fallback_images(image_dir, 1)
+
+        bg_image_path = image_paths[0] if image_paths else None
 
         # Stage 5.5: Generate slides (one per script segment — replaces Pexels for video body)
         from src.video.slide_gen import generate_slides
@@ -174,6 +180,7 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
             title=script_data["title"],
             config=config,
             output_dir=slide_dir,
+            bg_image_path=bg_image_path,
         )
         per_slide_durations = [s["duration_sec"] for s in audio_segments]
 
@@ -220,6 +227,7 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
                 title=script_data["title"],
                 config=config,
                 output_dir=shorts_slide_dir,
+                bg_image_path=bg_image_path,
             )
             per_shorts_durations = [s["duration_sec"] for s in shorts_audio_segments]
         else:

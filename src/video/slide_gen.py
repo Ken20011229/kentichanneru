@@ -78,6 +78,27 @@ def _wrap_px(draw: ImageDraw.ImageDraw, text: str, font, max_w: int) -> list[str
 
 # ── Background helpers ─────────────────────────────────────────────────────────
 
+def _photo_bg(path: str, dark: bool = False) -> Image.Image:
+    """Load image, center-crop to W×H, blur, apply tinted overlay."""
+    try:
+        img = Image.open(path).convert("RGBA")
+        ir = img.width / img.height
+        cr = W / H
+        if ir > cr:
+            nw, nh = int(H * ir), H
+        else:
+            nw, nh = W, int(W / ir)
+        img = img.resize((nw, nh), Image.LANCZOS)
+        left, top = (nw - W) // 2, (nh - H) // 2
+        img = img.crop((left, top, left + W, top + H))
+        img = img.filter(ImageFilter.GaussianBlur(radius=12))
+        overlay_color = (8, 10, 20, 195) if dark else (252, 247, 238, 165)
+        return Image.alpha_composite(img, Image.new("RGBA", (W, H), overlay_color))
+    except Exception as e:
+        logger.warning(f"Photo background failed: {e}")
+        return Image.new("RGBA", (W, H), (10, 12, 22, 255) if dark else (*BG_COLOR, 255))
+
+
 def _draw_deco_circles() -> Image.Image:
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
@@ -87,8 +108,8 @@ def _draw_deco_circles() -> Image.Image:
     return layer.filter(ImageFilter.GaussianBlur(radius=28))
 
 
-def _make_bg() -> Image.Image:
-    canvas = Image.new("RGBA", (W, H), (*BG_COLOR, 255))
+def _make_bg(bg_image_path: str = None) -> Image.Image:
+    canvas = _photo_bg(bg_image_path) if bg_image_path else Image.new("RGBA", (W, H), (*BG_COLOR, 255))
     canvas = Image.alpha_composite(canvas, _draw_deco_circles())
     rule = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     rd = ImageDraw.Draw(rule)
@@ -97,10 +118,10 @@ def _make_bg() -> Image.Image:
     return Image.alpha_composite(canvas, rule)
 
 
-def _make_dark_bg(accent: tuple) -> Image.Image:
+def _make_dark_bg(accent: tuple, bg_image_path: str = None) -> Image.Image:
     """Dark intro background with subtle accent glow — matches title-card style."""
     r, g, b = accent
-    canvas = Image.new("RGBA", (W, H), (10, 12, 22, 255))
+    canvas = _photo_bg(bg_image_path, dark=True) if bg_image_path else Image.new("RGBA", (W, H), (10, 12, 22, 255))
     glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow)
     for cx, cy, radius, alpha in [
@@ -269,9 +290,10 @@ def _text_card(canvas: Image.Image, draw: ImageDraw.ImageDraw,
 
 def _slide_intro(fp: str, title: str, text: str, accent: tuple,
                  section_num: int, badge_label: str,
-                 right_path: str, left_path: str) -> Image.Image:
+                 right_path: str, left_path: str,
+                 bg_image_path: str = None) -> Image.Image:
     """INTRO: dark background title card — channel label top, large title, subtle subtext."""
-    canvas = _make_dark_bg(accent)
+    canvas = _make_dark_bg(accent, bg_image_path)
     canvas, card_l, card_r = _paste_characters(canvas, right_path, left_path, char_ratio=0.68)
     draw   = ImageDraw.Draw(canvas)
 
@@ -328,9 +350,10 @@ def _slide_intro(fp: str, title: str, text: str, accent: tuple,
 
 def _slide_point(fp: str, text: str, keyword: str, accent: tuple,
                  section_num: int, badge_label: str, seg_idx: int,
-                 right_path: str, left_path: str) -> Image.Image:
+                 right_path: str, left_path: str,
+                 bg_image_path: str = None) -> Image.Image:
     """POINT: section badge + keyword chip + narration card + characters."""
-    canvas = _make_bg()
+    canvas = _make_bg(bg_image_path)
     canvas, card_l, card_r = _paste_characters(canvas, right_path, left_path, char_ratio=0.78)
     draw = ImageDraw.Draw(canvas)
     _draw_section_badge(draw, fp, accent, section_num, badge_label)
@@ -368,9 +391,10 @@ def _slide_point(fp: str, text: str, keyword: str, accent: tuple,
 
 def _slide_keyword(fp: str, text: str, keyword: str, accent: tuple,
                    section_num: int, badge_label: str,
-                   right_path: str, left_path: str) -> Image.Image:
+                   right_path: str, left_path: str,
+                   bg_image_path: str = None) -> Image.Image:
     """KEYWORD: large keyword text directly on background (no box), narration card below."""
-    canvas = _make_bg()
+    canvas = _make_bg(bg_image_path)
     canvas, card_l, card_r = _paste_characters(canvas, right_path, left_path, char_ratio=0.75)
     draw = ImageDraw.Draw(canvas)
     _draw_section_badge(draw, fp, accent, section_num, badge_label)
@@ -423,9 +447,10 @@ def _slide_keyword(fp: str, text: str, keyword: str, accent: tuple,
 
 def _slide_detail(fp: str, text: str, keyword: str, accent: tuple,
                   section_num: int, badge_label: str,
-                  right_path: str, left_path: str) -> Image.Image:
+                  right_path: str, left_path: str,
+                  bg_image_path: str = None) -> Image.Image:
     """DETAIL: text card center + optional arrow→keyword + characters."""
-    canvas = _make_bg()
+    canvas = _make_bg(bg_image_path)
     canvas, card_l, card_r = _paste_characters(canvas, right_path, left_path, char_ratio=0.76)
     draw = ImageDraw.Draw(canvas)
     _draw_section_badge(draw, fp, accent, section_num, badge_label)
@@ -461,6 +486,7 @@ def generate_slides(
     title: str,
     config: dict,
     output_dir: str,
+    bg_image_path: str = None,
 ) -> list[str]:
     """Generate one 1920×1080 slide image per segment. Returns list of paths."""
     os.makedirs(output_dir, exist_ok=True)
@@ -499,16 +525,20 @@ def generate_slides(
         try:
             if visual_type == "intro":
                 img = _slide_intro(fp, title, text, accent,
-                                   sec_num, slide_label, right_path, left_path)
+                                   sec_num, slide_label, right_path, left_path,
+                                   bg_image_path=bg_image_path)
             elif visual_type == "keyword":
                 img = _slide_keyword(fp, text, keyword, accent,
-                                     sec_num, slide_label, right_path, left_path)
+                                     sec_num, slide_label, right_path, left_path,
+                                     bg_image_path=bg_image_path)
             elif visual_type == "point":
                 img = _slide_point(fp, text, keyword, accent,
-                                   sec_num, slide_label, idx, right_path, left_path)
+                                   sec_num, slide_label, idx, right_path, left_path,
+                                   bg_image_path=bg_image_path)
             else:
                 img = _slide_detail(fp, text, keyword, accent,
-                                    sec_num, slide_label, right_path, left_path)
+                                    sec_num, slide_label, right_path, left_path,
+                                    bg_image_path=bg_image_path)
         except Exception as e:
             logger.error(f"Slide {idx} generation failed ({visual_type}): {e}")
             img = _make_bg().convert("RGB")

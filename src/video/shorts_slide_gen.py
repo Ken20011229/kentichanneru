@@ -61,14 +61,33 @@ def _wrap_px(draw, text, font, max_w):
     return lines
 
 
-def _make_bg():
+def _photo_bg(path: str) -> Image.Image:
+    try:
+        img = Image.open(path).convert("RGBA")
+        ir = img.width / img.height
+        cr = W / H
+        if ir > cr:
+            nw, nh = int(H * ir), H
+        else:
+            nw, nh = W, int(W / ir)
+        img = img.resize((nw, nh), Image.LANCZOS)
+        left, top = (nw - W) // 2, (nh - H) // 2
+        img = img.crop((left, top, left + W, top + H))
+        img = img.filter(ImageFilter.GaussianBlur(radius=14))
+        return Image.alpha_composite(img, Image.new("RGBA", (W, H), (252, 247, 238, 165)))
+    except Exception as e:
+        logger.warning(f"Shorts photo background failed: {e}")
+        return Image.new("RGBA", (W, H), (*BG_COLOR, 255))
+
+
+def _make_bg(bg_image_path: str = None):
     deco = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(deco)
     for rx, ry, r, color in DECO_CIRCLES:
         cx, cy = int(W * rx), int(H * ry)
         d.ellipse([(cx - r, cy - r), (cx + r, cy + r)], fill=color)
     deco = deco.filter(ImageFilter.GaussianBlur(radius=28))
-    canvas = Image.new("RGBA", (W, H), (*BG_COLOR, 255))
+    canvas = _photo_bg(bg_image_path) if bg_image_path else Image.new("RGBA", (W, H), (*BG_COLOR, 255))
     canvas = Image.alpha_composite(canvas, deco)
     rule = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     rd = ImageDraw.Draw(rule)
@@ -138,6 +157,7 @@ def generate_shorts_slides(
     title: str,
     config: dict,
     output_dir: str,
+    bg_image_path: str = None,
 ) -> list[str]:
     """Generate one 1080×1920 slide per Shorts segment. Returns list of paths."""
     os.makedirs(output_dir, exist_ok=True)
@@ -164,7 +184,7 @@ def generate_shorts_slides(
         sec_label  = _SECTION_LABELS[s]
         slide_label = badge_label if idx == 0 else sec_label
 
-        canvas = _make_bg()
+        canvas = _make_bg(bg_image_path)
 
         # Character at bottom (single character, matching speaker)
         char_path = right_path if speaker == "right" else left_path
