@@ -76,6 +76,8 @@ images:
     enabled: false
     access_key: ""
     per_page: 15
+  huggingface:
+    enabled: true
   images_per_video: 8
 
 video:

@@ -151,6 +151,13 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
                 image_paths = unsplash.fetch_images_for_keywords(keywords, image_dir, total=1)
 
         if not image_paths:
+            hf_cfg = config["images"].get("huggingface", {})
+            if hf_cfg.get("enabled") and os.environ.get("HF_TOKEN"):
+                from src.images.huggingface_client import HuggingFaceImageClient
+                hf = HuggingFaceImageClient(os.environ["HF_TOKEN"])
+                image_paths = hf.fetch_images_for_keywords(keywords, image_dir, total=1)
+
+        if not image_paths:
             logger.warning("No images from APIs, generating fallback gradient for thumbnail")
             image_paths = generate_fallback_images(image_dir, 1)
 
