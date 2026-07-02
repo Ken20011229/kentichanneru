@@ -1,0 +1,16 @@
+name: Keepalive
+
+on:
+  schedule:
+    - cron: '0 12 * * 1'  # 毎週月曜 21:00 JST
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gautamkrishnar/keepalive-workflow@v2
+        with:
+          committer_username: 'github-actions[bot]'
+          committer_email: 'github-actions[bot]@users.noreply.github.com'
