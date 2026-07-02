@@ -381,6 +381,100 @@ channels:
       - Pets
     use_hackernews: false
 
+  - id: "smartphone"
+    name: "スマホ"
+    youtube_category_id: "28"
+    accent_color: [0, 180, 255]
+    badge_label: "スマホ情報"
+    script_style: "スマホ・ガジェット解説者。専門用語を噛み砕きながら、新機種の特徴や便利な使い方・裏技を実演するように分かりやすく紹介する。"
+    rss_feeds:
+      - url: "https://k-tai.watch.impress.co.jp/data/rss/1.0/ktw/feed.rdf"
+        name: "ケータイ Watch"
+        language: "ja"
+      - url: "https://rss.itmedia.co.jp/rss/2.0/mobile.xml"
+        name: "ITmedia Mobile"
+        language: "ja"
+    subreddits:
+      - android
+      - iphone
+      - GooglePixel
+      - apple
+    use_hackernews: false
+
+  - id: "pc_apps"
+    name: "パソコン・アプリ"
+    youtube_category_id: "28"
+    accent_color: [90, 110, 220]
+    badge_label: "アプリ活用術"
+    script_style: "PC・アプリ解説者。難しい設定や操作を初心者にも分かるように丁寧に解説し、時短テクニックや便利な使い方を紹介する。"
+    rss_feeds:
+      - url: "https://forest.watch.impress.co.jp/data/rss/1.0/wf/feed.rdf"
+        name: "窓の杜"
+        language: "ja"
+      - url: "https://pc.watch.impress.co.jp/data/rss/1.0/pcw/feed.rdf"
+        name: "PC Watch"
+        language: "ja"
+      - url: "https://rss.itmedia.co.jp/rss/2.0/pcuser.xml"
+        name: "ITmedia PC USER"
+        language: "ja"
+    subreddits:
+      - software
+      - techsupport
+      - windows
+    use_hackernews: false
+
+  - id: "region"
+    name: "地域雑学"
+    youtube_category_id: "27"
+    accent_color: [140, 110, 60]
+    badge_label: "地域雑学"
+    script_style: "地域雑学ゆっくり解説者。各地の歴史・文化・意外な事実を「へえ」と思わせるように、ゆったりとしたテンポで分かりやすく伝える。"
+    rss_feeds:
+      - url: "https://news.yahoo.co.jp/rss/topics/local.xml"
+        name: "Yahoo!地域"
+        language: "ja"
+      - url: "https://tabizine.jp/feed/"
+        name: "TABIZINE"
+        language: "ja"
+    subreddits:
+      - japan
+      - todayilearned
+    use_hackernews: false
+
+  - id: "saving"
+    name: "節約"
+    youtube_category_id: "26"
+    accent_color: [60, 190, 100]
+    badge_label: "節約術"
+    script_style: "節約系ナレーター。生活に役立つ節約術やお得情報を、身近な体験談のように親しみやすく、無理なく実践したくなるように伝える。"
+    rss_feeds:
+      - url: "https://financial-field.com/feed"
+        name: "ファイナンシャルフィールド"
+        language: "ja"
+      - url: "https://news.yahoo.co.jp/rss/topics/business.xml"
+        name: "Yahoo!経済"
+        language: "ja"
+    subreddits:
+      - frugal
+      - personalfinance
+    use_hackernews: false
+
+  - id: "senior"
+    name: "シニア"
+    youtube_category_id: "22"
+    accent_color: [190, 150, 200]
+    badge_label: "シニア情報"
+    script_style: "シニア向けナレーター。ゆっくり・はっきりとした話し方で、健康・年金・暮らしの知恵を温かみのある口調で分かりやすく伝える。"
+    rss_feeds:
+      - url: "https://serai.jp/feed"
+        name: "サライ.jp"
+        language: "ja"
+      - url: "https://news.yahoo.co.jp/rss/topics/domestic.xml"
+        name: "Yahoo!国内"
+        language: "ja"
+    subreddits: []
+    use_hackernews: false
+
 deduplication:
   store_file: "data/seen_items.json"
   ttl_days: 30
