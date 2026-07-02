@@ -18,7 +18,6 @@ def _make_header(accent_rgb: tuple, channel_name: str = "NEWS") -> str:
     lb = min(255, b + 70)
 
     accent_outline = _ass_color(r, g, b)
-    accent_box     = _ass_color(r, g, b, 0x10)
     accent_text    = _ass_color(lr, lg, lb)
     banner_box     = "&H99201810"
 
@@ -34,7 +33,7 @@ Timer: 100.0000
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Detail,Noto Sans CJK JP,70,&H00FFFFFF,&H00FFFFFF,&H99000000,&H00000000,0,0,1,10,2,2,80,80,88,1
 Style: Point,Noto Sans CJK JP,78,&H00FFFFFF,&H00FFFFFF,{accent_outline},&H00000000,-1,0,1,9,2,2,80,80,88,1
-Style: Keyword,Noto Sans CJK JP,84,&H00FFFFFF,&H00FFFFFF,&H00000000,{accent_box},-1,0,3,0,0,2,80,80,88,1
+Style: Keyword,Noto Sans CJK JP,74,&H00FFFFFF,&H00FFFFFF,{accent_outline},&H00000000,-1,0,1,9,3,2,80,80,88,1
 Style: Intro,Noto Sans CJK JP,88,{accent_text},&H00FFFFFF,&H00000000,&HAA0A0A14,-1,0,3,0,0,2,80,80,88,1
 Style: Banner_L,Noto Sans CJK JP,28,{accent_text},&H00000000,&H00000000,{banner_box},-1,0,3,3,0,7,16,0,14,1
 Style: Banner_R,Noto Sans CJK JP,24,{accent_text},&H00000000,&H00000000,{banner_box},-1,0,3,3,0,9,0,16,14,1
@@ -129,7 +128,6 @@ def _format_event(start: str, end: str, text: str,
         style = "Intro"
     elif visual_type == "keyword":
         style = "Keyword"
-        body  = "　" + body + "　"
     elif visual_type == "point":
         style = "Point"
     else:

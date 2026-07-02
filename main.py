@@ -37,6 +37,7 @@ def setup_logging(config: dict):
 def main():
     parser = argparse.ArgumentParser(description="YouTube Auto Poster")
     parser.add_argument("--once",           action="store_true", help="Run pipeline once and exit")
+    parser.add_argument("--deep-dive",      action="store_true", help="Deep-dive video on a past horizontal video topic")
     parser.add_argument("--skip-upload",    action="store_true", help="Skip YouTube upload (test mode)")
     parser.add_argument("--update-stats",   action="store_true", help="Fetch latest stats for all logged videos")
     parser.add_argument("--analyze",        action="store_true", help="Run self-improvement analysis and update strategy")
@@ -100,6 +101,11 @@ def main():
         logger.info("Running self-improvement analysis...")
         from src.analytics.evolver import run as evolve
         evolve()
+
+    elif args.deep_dive:
+        logger.info("Running deep-dive pipeline...")
+        from src.pipeline import run_deep_dive_pipeline
+        run_deep_dive_pipeline(config, skip_upload=args.skip_upload)
 
     elif args.once:
         logger.info("Running pipeline once...")

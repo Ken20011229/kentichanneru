@@ -25,13 +25,13 @@ def fetch_channel_ctr(analytics_service, days_back: int = 90) -> float:
             ids="channel==MINE",
             startDate=start_date,
             endDate=end_date,
-            metrics="impressions,impressionClickThroughRate",
+            metrics="impressionClickThroughRate",
         ).execute()
         rows = resp.get("rows", [])
         if rows:
-            return float(rows[0][1])
+            return float(rows[0][0])
     except Exception as e:
-        logger.warning(f"Channel CTR fetch failed: {e}")
+        logger.debug(f"Channel CTR not available (small channel or insufficient data): {e}")
     return 0.0
 
 

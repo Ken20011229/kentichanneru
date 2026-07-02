@@ -29,17 +29,18 @@ def log_video(video_id: str, metadata: dict, log_file: str = _DEFAULT_LOG):
     """Record a newly uploaded video."""
     records = _load(log_file)
     records.append({
-        "video_id": video_id,
-        "shorts_id": metadata.get("shorts_id"),
-        "channel_id": metadata.get("channel_id"),
-        "channel_name": metadata.get("channel_name"),
-        "title": metadata.get("title"),
-        "bgm": metadata.get("bgm"),
-        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "video_id":        video_id,
+        "shorts_id":       metadata.get("shorts_id"),
+        "channel_id":      metadata.get("channel_id"),
+        "channel_name":    metadata.get("channel_name"),
+        "title":           metadata.get("title"),
+        "bgm":             metadata.get("bgm"),
+        "thumbnail_style": metadata.get("thumbnail_style"),
+        "uploaded_at":     datetime.now(timezone.utc).isoformat(),
         "stats_updated_at": None,
-        "views": None,
-        "likes": None,
-        "comments": None,
+        "views":        None,
+        "likes":        None,
+        "comments":     None,
         "shorts_views": None,
         "shorts_likes": None,
     })

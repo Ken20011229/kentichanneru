@@ -68,6 +68,18 @@ def run(log_file: str = "data/video_log.json"):
         for ch, avg in avg_views.items()
     }
 
+    # ── Thumbnail style weights (by CTR) ─────────────────────────
+    from src.video.thumbnail_style_selector import STYLES
+    style_ctr: dict = defaultdict(list)
+    for r in with_analytics:
+        st = r.get("thumbnail_style")
+        if st and r.get("ctr") is not None:
+            style_ctr[st].append(r["ctr"])
+
+    thumbnail_style_weights: dict = {}
+    global_ctr_baseline = global_ctr if "global_ctr" in dir() else 0.04
+    # We'll fill this properly after computing global_ctr below
+
     # ── BGM ranking (by avg view duration = retention proxy) ──────
     bgm_ret  = defaultdict(list)
     bgm_view = defaultdict(list)
@@ -95,6 +107,16 @@ def run(log_file: str = "data/video_log.json"):
     global_ctr = _avg(all_ctrs)
     global_ret = _avg(all_rets)
 
+    # ── Thumbnail style weights (CTR-based learning) ──────────────
+    for st in STYLES:
+        ctrs = style_ctr.get(st, [])
+        if len(ctrs) >= 2:
+            avg_st_ctr = _avg(ctrs)
+            weight = round(min(3.0, max(0.3, avg_st_ctr / max(global_ctr, 0.01))), 3)
+        else:
+            weight = 1.0
+        thumbnail_style_weights[st] = weight
+
     # ── Insights ──────────────────────────────────────────────────
     insights = []
     for ch in sorted(channel_weights, key=lambda c: -channel_weights[c]):
@@ -113,6 +135,17 @@ def run(log_file: str = "data/video_log.json"):
     if bgm_ranking:
         insights.append(f"Best BGM (retention): {bgm_ranking[0]}")
 
+    # Thumbnail style insights
+    styles_with_data = {s: w for s, w in thumbnail_style_weights.items() if style_ctr.get(s)}
+    if styles_with_data:
+        best_style  = max(styles_with_data, key=styles_with_data.get)
+        worst_style = min(styles_with_data, key=styles_with_data.get)
+        insights.append(f"Thumbnail style CTR weights: {thumbnail_style_weights}")
+        insights.append(f"Best style: {best_style} (weight={thumbnail_style_weights[best_style]:.2f}), "
+                        f"Worst: {worst_style} (weight={thumbnail_style_weights[worst_style]:.2f})")
+        sample_info = {s: len(style_ctr.get(s, [])) for s in STYLES}
+        insights.append(f"Style sample counts: {sample_info}")
+
     # ── Write strategy.json ───────────────────────────────────────
     strategy = {
         "updated_at":           datetime.now(timezone.utc).isoformat(),
@@ -126,6 +159,8 @@ def run(log_file: str = "data/video_log.json"):
         "global_avg_retention_sec": round(global_ret),
         "bgm_ranking":          bgm_ranking,
         "bgm_score":            {b: round(s, 2) for b, s in bgm_score.items()},
+        "thumbnail_style_weights":       thumbnail_style_weights,
+        "thumbnail_style_sample_counts": {s: len(style_ctr.get(s, [])) for s in STYLES},
         "insights":             insights,
     }
     Path(_STRATEGY_FILE).parent.mkdir(parents=True, exist_ok=True)
@@ -181,6 +216,24 @@ def run(log_file: str = "data/video_log.json"):
 
     if top_brackets:
         style_notes.append(f"高再生数タイトルの鉄板パターン: 【{'】【'.join(top_brackets[:3])}】")
+
+    # Thumbnail style learning notes
+    if styles_with_data:
+        best_s = max(thumbnail_style_weights, key=thumbnail_style_weights.get)
+        worst_s = min(thumbnail_style_weights, key=thumbnail_style_weights.get)
+        bw, ww = thumbnail_style_weights[best_s], thumbnail_style_weights[worst_s]
+        if bw > ww * 1.4:
+            style_notes.append(
+                f"サムネイルスタイル「{best_s}」のCTRが最も高い(weight={bw:.2f})。"
+                f"「{worst_s}」(weight={ww:.2f})より優位 — 自動的に出現頻度を上げています"
+            )
+        # Styles with no data are undersampled — encourage exploration
+        untested = [s for s in STYLES if not style_ctr.get(s)]
+        if untested:
+            style_notes.append(
+                f"未テストのサムネイルスタイル: {', '.join(untested)} — "
+                f"データ蓄積のため均等に試行中（重み=1.0）"
+            )
 
     # Shorts-specific insights
     shorts_records = [r for r in with_stats if r.get('shorts_views') is not None]

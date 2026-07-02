@@ -47,14 +47,14 @@ sources:
 
   google_trends:
     enabled: true
-    max_topics: 20   # daily trending topics to fetch
+    max_topics: 80   # fetch broadly across all genre feeds for variety
 
 tts:
   provider: "voicevox"
 
 edge_tts:
   voice: "ja-JP-NanamiNeural"
-  rate: "+10%"
+  rate: "-5%"
 
 voicevox:
   base_url: "http://localhost:50021"
@@ -174,10 +174,13 @@ channels:
     youtube_category_id: "20"
     accent_color: [120, 80, 255]
     badge_label: "ゲーム情報"
-    script_style: "ゲーム系YouTuber。テンション高め、楽しく、視聴者と一緒に盛り上がるスタイル。"
+    script_style: "ゲーム系YouTuber。テンション高め、楽しく、視聴者と一緒に盛り上がるスタイル。新作・攻略・eスポーツ情報を熱量高く紹介する。"
     rss_feeds:
       - url: "https://game.watch.impress.co.jp/data/rss/1.0/gmw/feed.rdf"
         name: "Game Watch"
+        language: "ja"
+      - url: "https://www.4gamer.net/games/rss/4gamer_1024.rdf"
+        name: "4Gamer.net"
         language: "ja"
     subreddits:
       - gaming
@@ -191,8 +194,20 @@ channels:
     youtube_category_id: "24"
     accent_color: [255, 180, 30]
     badge_label: "エンタメ最新"
-    script_style: "エンタメ系ナレーター。明るく親しみやすく、視聴者を楽しませる話し方。"
-    rss_feeds: []
+    script_style: "エンタメ系ナレーター。明るく親しみやすく、視聴者を楽しませる話し方。話題のニュースを分かりやすく、テンポよく伝える。"
+    rss_feeds:
+      - url: "https://news.yahoo.co.jp/rss/topics/entertainment.xml"
+        name: "Yahoo!エンタメ"
+        language: "ja"
+      - url: "https://natalie.mu/music/feed/news"
+        name: "音楽ナタリー"
+        language: "ja"
+      - url: "https://natalie.mu/comic/feed/news"
+        name: "コミックナタリー"
+        language: "ja"
+      - url: "https://natalie.mu/eiga/feed/news"
+        name: "映画ナタリー"
+        language: "ja"
     subreddits:
       - movies
       - television
@@ -205,8 +220,14 @@ channels:
     youtube_category_id: "28"
     accent_color: [30, 210, 180]
     badge_label: "科学最前線"
-    script_style: "科学番組ナレーター。知的好奇心を刺激し、驚きと発見を丁寧に伝える。"
-    rss_feeds: []
+    script_style: "科学番組ナレーター。知的好奇心を刺激し、驚きと発見を丁寧に伝える。難しい内容も視聴者が「なるほど！」と理解できるよう噛み砕く。"
+    rss_feeds:
+      - url: "https://news.yahoo.co.jp/rss/topics/science.xml"
+        name: "Yahoo!科学"
+        language: "ja"
+      - url: "https://news.mynavi.jp/rss/index.rss"
+        name: "Mynavi News"
+        language: "ja"
     subreddits:
       - science
       - space
@@ -219,8 +240,11 @@ channels:
     youtube_category_id: "17"
     accent_color: [255, 60, 60]
     badge_label: "スポーツ速報"
-    script_style: "スポーツ実況者。興奮を伝え、ドラマとダイナミズムを描く臨場感あふれる話し方。"
-    rss_feeds: []
+    script_style: "スポーツ実況者。興奮を伝え、ドラマとダイナミズムを描く臨場感あふれる話し方。選手の活躍や試合の流れを鮮明に描写する。"
+    rss_feeds:
+      - url: "https://news.yahoo.co.jp/rss/topics/sports.xml"
+        name: "Yahoo!スポーツ"
+        language: "ja"
     subreddits:
       - sports
       - baseball
@@ -233,8 +257,11 @@ channels:
     youtube_category_id: "26"
     accent_color: [255, 120, 40]
     badge_label: "グルメ情報"
-    script_style: "料理・グルメ系ナレーター。食への愛情と美味しさを伝える、温かみのある話し方。"
-    rss_feeds: []
+    script_style: "料理・グルメ系ナレーター。食への愛情と美味しさを伝える、温かみのある話し方。食文化・レシピ・トレンドグルメを楽しく紹介する。"
+    rss_feeds:
+      - url: "https://news.livedoor.com/topics/rss/gourmet.xml"
+        name: "livedoor グルメ"
+        language: "ja"
     subreddits:
       - food
       - cooking
@@ -247,13 +274,111 @@ channels:
     youtube_category_id: "10"
     accent_color: [200, 60, 210]
     badge_label: "音楽ニュース"
-    script_style: "音楽系ナレーター。リズム感があり、感情豊かに音楽の世界と魅力を伝える。"
-    rss_feeds: []
+    script_style: "音楽系ナレーター。リズム感があり、感情豊かに音楽の世界と魅力を伝える。アーティストの魅力や音楽シーンのトレンドを熱量高く紹介する。"
+    rss_feeds:
+      - url: "https://natalie.mu/music/feed/news"
+        name: "音楽ナタリー"
+        language: "ja"
     subreddits:
       - Music
       - jpop
       - jrock
       - indieheads
+    use_hackernews: false
+
+  - id: "travel"
+    name: "旅行"
+    youtube_category_id: "19"
+    accent_color: [40, 190, 150]
+    badge_label: "旅行情報"
+    script_style: "旅行・観光系ナレーター。行ってみたい！と思わせるワクワク感と臨場感を大切に、各地の魅力や穴場スポット・文化を生き生きと紹介する。"
+    rss_feeds:
+      - url: "https://tabizine.jp/feed/"
+        name: "TABIZINE"
+        language: "ja"
+      - url: "https://travel.spot-app.jp/feed/"
+        name: "旅色SPOTTABI"
+        language: "ja"
+    subreddits:
+      - travel
+      - JapanTravel
+      - solotravel
+    use_hackernews: false
+
+  - id: "education"
+    name: "教育"
+    youtube_category_id: "27"
+    accent_color: [255, 200, 30]
+    badge_label: "学びの時間"
+    script_style: "教育・学習系ナレーター。「知らなかった！」「もっと知りたい！」と思わせる知的好奇心を刺激する語り口。難しいことをわかりやすく、面白く伝える。"
+    rss_feeds:
+      - url: "https://resemom.jp/feed/"
+        name: "ReseMom"
+        language: "ja"
+    subreddits:
+      - learnprogramming
+      - science
+      - history
+      - todayilearned
+    use_hackernews: true
+
+  - id: "movie"
+    name: "映画"
+    youtube_category_id: "1"
+    accent_color: [220, 50, 80]
+    badge_label: "映画情報"
+    script_style: "映画評論系ナレーター。作品の魅力・見どころ・背景を熱く語り、「観てみたい！」という気持ちを引き出す。ネタバレなしで核心を伝えるのが得意。"
+    rss_feeds:
+      - url: "https://eiga.com/rss/news.rss"
+        name: "映画.com"
+        language: "ja"
+      - url: "https://natalie.mu/eiga/feed/news"
+        name: "映画ナタリー"
+        language: "ja"
+      - url: "https://www.cinemacafe.net/sys/feed/"
+        name: "シネマカフェ"
+        language: "ja"
+    subreddits:
+      - movies
+      - TrueFilm
+      - JapaneseMovies
+    use_hackernews: false
+
+  - id: "anime"
+    name: "アニメ"
+    youtube_category_id: "1"
+    accent_color: [255, 100, 180]
+    badge_label: "アニメ最新"
+    script_style: "アニメ系ナレーター。作品への愛と熱量を持ち、アニメファンが思わず頷くような語り口で最新情報や見どころを伝える。"
+    rss_feeds:
+      - url: "https://animeanime.jp/rss/index.rdf"
+        name: "アニメ!アニメ!"
+        language: "ja"
+      - url: "https://natalie.mu/comic/feed/news"
+        name: "コミックナタリー"
+        language: "ja"
+    subreddits:
+      - anime
+      - manga
+      - animenews
+    use_hackernews: false
+
+  - id: "pets"
+    name: "ペット・動物"
+    youtube_category_id: "15"
+    accent_color: [255, 160, 40]
+    badge_label: "動物・ペット"
+    script_style: "ペット・動物系ナレーター。動物への愛情あふれる温かい語り口で、かわいい・面白い・感動するエピソードや生態の不思議を楽しく紹介する。"
+    rss_feeds:
+      - url: "https://news.livedoor.com/topics/rss/animal.xml"
+        name: "livedoor 動物"
+        language: "ja"
+    subreddits:
+      - aww
+      - animals
+      - cats
+      - dogs
+      - Pets
     use_hackernews: false
 
 deduplication:

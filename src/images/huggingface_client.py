@@ -33,13 +33,17 @@ class HuggingFaceImageClient:
         resp.raise_for_status()
         return resp.content
 
-    def generate_image(self, prompt: str, output_path: str) -> str | None:
-        """Generate a single image to output_path. Returns path or None on failure."""
+    def generate_image(self, prompt: str, output_path: str,
+                       width: int = 1280, height: int = 720) -> str | None:
+        """Generate a single image to output_path. Returns path or None on failure.
+
+        Use width=768, height=1344 for portrait (9:16) Shorts images.
+        """
         try:
-            image_bytes = self.generate(prompt)
+            image_bytes = self.generate(prompt, width=width, height=height)
             with open(output_path, "wb") as f:
                 f.write(image_bytes)
-            logger.info(f"HuggingFace image saved: {output_path}")
+            logger.info(f"HuggingFace image saved: {output_path} ({width}×{height})")
             return output_path
         except Exception as e:
             logger.warning(f"HuggingFace single image failed: {e}")

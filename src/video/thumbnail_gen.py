@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 
@@ -72,6 +73,89 @@ def _extract_hook(text: str) -> tuple[str | None, str]:
         if end != -1:
             return text[1:end], text[end + 1:].strip()
     return None, text
+
+
+def _get_and_increment_episode(channel_id: str) -> int:
+    """Read, increment, and persist episode count for the given channel."""
+    state_path = Path("data/episode_counts.json")
+    state: dict = {}
+    if state_path.exists():
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception:
+            pass
+    count = state.get(channel_id, 0) + 1
+    state[channel_id] = count
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    return count
+
+
+def _split_highlights(text: str) -> list[tuple[str, bool]]:
+    """Split text into (segment, is_highlighted) pairs for 「」 quoted text."""
+    parts: list[tuple[str, bool]] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "「":
+            end = text.find("」", i + 1)
+            if end != -1:
+                parts.append((text[i:end + 1], True))
+                i = end + 1
+                continue
+        next_open = text.find("「", i)
+        if next_open == -1:
+            if i < len(text):
+                parts.append((text[i:], False))
+            break
+        parts.append((text[i:next_open], False))
+        i = next_open
+    return parts or [(text, False)]
+
+
+def _draw_mixed_line(draw: ImageDraw.ImageDraw, line: str, font,
+                     x: int, y: int, base_color: tuple, accent: tuple,
+                     stroke_width: int = 5) -> None:
+    """Render a single line with 「」 quoted spans in accent color."""
+    parts = _split_highlights(line)
+    cx = x
+    for seg_text, highlighted in parts:
+        color = (*accent, 255) if highlighted else base_color
+        draw.text((cx, y), seg_text, font=font, fill=color,
+                  stroke_width=stroke_width, stroke_fill=_TITLE_STROKE)
+        bb = draw.textbbox((cx, y), seg_text, font=font)
+        cx += bb[2] - bb[0]
+
+
+def _draw_speech_bubble(canvas: Image.Image, text: str, font,
+                        bx: int, by: int, accent: tuple) -> Image.Image:
+    """Draw a comic speech bubble. Returns updated canvas."""
+    tmp_draw = ImageDraw.Draw(canvas)
+    pad_x, pad_y = 18, 12
+    tw = _tw(tmp_draw, text, font)
+    th = _th(tmp_draw, text, font)
+    bw = tw + pad_x * 2
+    bh = th + pad_y * 2
+    tail = 22
+
+    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    # Bubble body
+    ld.rounded_rectangle([(bx, by), (bx + bw, by + bh)],
+                         radius=14, fill=(255, 255, 255, 245))
+    ld.rounded_rectangle([(bx, by), (bx + bw, by + bh)],
+                         radius=14, outline=(*accent, 255), width=4)
+    # Triangular tail pointing down-left (toward character area)
+    tail_pts = [(bx + 24, by + bh), (bx + 48, by + bh),
+                (bx + 14, by + bh + tail)]
+    ld.polygon(tail_pts, fill=(255, 255, 255, 245))
+    ld.polygon(tail_pts, outline=(*accent, 220))
+    canvas = Image.alpha_composite(canvas, layer)
+    # Text
+    d = ImageDraw.Draw(canvas)
+    d.text((bx + pad_x, by + pad_y), text, font=font, fill=(20, 20, 20))
+    return canvas
 
 
 def _draw_deco_circles(W: int, H: int) -> Image.Image:
@@ -154,6 +238,8 @@ def generate_thumbnail(
     title_text: str,
     output_path: str,
     config: dict,
+    reaction_text: str = "",
+    style: str | None = None,
 ) -> str:
     """Generate dark-style 1280×720 YouTube thumbnail with both characters."""
     cfg      = config["thumbnail"]
@@ -162,10 +248,33 @@ def generate_thumbnail(
     char_cfg = config.get("character", {})
     ch       = config.get("active_channel", {})
     accent   = tuple(ch.get("accent_color", list(_DEFAULT_ACCENT)))
-    badge_label = ch.get("badge_label", "速報")
+    channel_id  = ch.get("id", "default")
+    channel_name = ch.get("name", "")
+    episode_num  = _get_and_increment_episode(channel_id)
+    episode_label = f"第{episode_num}回"
 
     right_path = char_cfg.get("image_path", "")
     left_path  = char_cfg.get("left_image_path", "")
+
+    # ── Dispatch to style-specific renderers ──────────────────────
+    _render_kwargs = dict(
+        bg_image_path=background_image_path, title_text=title_text,
+        reaction_text=reaction_text, W=W, H=H, fp=fp, accent=accent,
+        episode_label=episode_label, channel_name=channel_name,
+        right_path=right_path, left_path=left_path,
+    )
+    _RENDERERS = {
+        "IMPACT": _render_impact,
+        "NEON":   _render_neon,
+        "CARD":   _render_card,
+        "BAND":   _render_band,
+    }
+    if style in _RENDERERS:
+        canvas = _RENDERERS[style](**_render_kwargs)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        canvas.convert("RGB").save(output_path, "JPEG", quality=95)
+        logger.info(f"Thumbnail ({style}) → {output_path}")
+        return output_path
 
     # ── 1. Background: photo if available, else dark bokeh ───────
     if background_image_path and Path(background_image_path).exists():
@@ -197,27 +306,35 @@ def generate_thumbnail(
 
     draw = ImageDraw.Draw(canvas)
 
-    # ── 3. Top-left badge ─────────────────────────────────────────
+    # ── 3. Top-left episode badge + channel name ──────────────────
     BX, BY = 30, 26
-    SQ = 48
-    draw.rounded_rectangle([(BX, BY), (BX + SQ, BY + SQ)], radius=7, fill=(*accent, 255))
-    font_sq = _font(fp, 28)
-    sym = "▶"
-    sw, sh = _tw(draw, sym, font_sq), _th(draw, sym, font_sq)
-    draw.text((BX + (SQ - sw) // 2, BY + (SQ - sh) // 2), sym, font=font_sq, fill=(255, 255, 255))
-    font_badge = _font(fp, 27)
-    bw = _tw(draw, badge_label, font_badge)
-    bh = _th(draw, badge_label, font_badge)
-    cx = BX + SQ + 8
-    cw = bw + 24
-    draw.rounded_rectangle([(cx, BY), (cx + cw, BY + SQ)], radius=7, fill=(20, 20, 20, 230))
-    draw.text((cx + 12, BY + (SQ - bh) // 2), badge_label, font=font_badge, fill=(255, 255, 255))
+    ep_label   = f"第{episode_num}回"
+    font_ep    = _font(fp, 38)
+    ep_w       = _tw(draw, ep_label, font_ep)
+    ep_h       = _th(draw, ep_label, font_ep)
+    ep_px, ep_py = 16, 8
+    ep_box_w   = ep_w + ep_px * 2
+    ep_box_h   = ep_h + ep_py * 2
+    draw.rounded_rectangle(
+        [(BX, BY), (BX + ep_box_w, BY + ep_box_h)],
+        radius=10, fill=(*accent, 255)
+    )
+    draw.text((BX + ep_px, BY + ep_py), ep_label, font=font_ep,
+              fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0, 80))
+
+    # Channel name small label below badge
+    label_y = BY + ep_box_h + 8
+    if channel_name:
+        font_ch = _font(fp, 24)
+        draw.text((BX, label_y), channel_name, font=font_ch,
+                  fill=(255, 255, 255, 210), stroke_width=3, stroke_fill=_TITLE_STROKE)
+        label_y += _th(draw, channel_name, font_ch) + 10
 
     # ── 4. Large golden title on left ─────────────────────────────
     hook, main_text = _extract_hook(title_text)
 
     TX      = 54
-    TITLE_Y = BY + SQ + 28
+    TITLE_Y = label_y
     MAX_TW  = char_inner_x - TX - 30   # don't overlap characters
 
     # Hook badge
@@ -249,12 +366,24 @@ def generate_thumbnail(
     lh = max((_th(draw, ln, font_title) for ln in lines), default=52) + 12
     ty = TITLE_Y
     for ln in lines:
-        # Bold effect: draw text with black stroke, then golden fill
-        draw.text((TX, ty), ln, font=font_title,
-                  fill=_TITLE_YELLOW, stroke_width=5, stroke_fill=_TITLE_STROKE)
+        _draw_mixed_line(draw, ln, font_title, TX, ty, _TITLE_YELLOW, accent, stroke_width=5)
         ty += lh
 
-    # ── 5. Bottom accent stripe ───────────────────────────────────
+    # ── 5. Speech bubble (reaction_text) ─────────────────────────
+    if reaction_text and reaction_text.strip():
+        font_bub = _font(fp, 32)
+        bub_x = char_inner_x + 10
+        bub_y = 26
+        # Clamp so bubble doesn't go off right edge
+        tmp_d = ImageDraw.Draw(canvas)
+        bub_content_w = _tw(tmp_d, reaction_text.strip(), font_bub)
+        if bub_x + bub_content_w + 40 > W - 20:
+            bub_x = max(char_inner_x - 20, W - bub_content_w - 80)
+        canvas = _draw_speech_bubble(canvas, reaction_text.strip(), font_bub,
+                                     bub_x, bub_y, accent)
+        draw = ImageDraw.Draw(canvas)
+
+    # ── 6. Bottom accent stripe ───────────────────────────────────
     draw.rectangle([(0, H - 6), (W, H)], fill=(*accent, 255))
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -283,7 +412,8 @@ def generate_shorts_thumbnail(
     W, H     = 1080, 1920
     ch       = config.get("active_channel", {})
     accent   = tuple(ch.get("accent_color", list(_DEFAULT_ACCENT)))
-    badge_label = ch.get("badge_label", "速報")
+    channel_id   = ch.get("id", "default")
+    channel_name = ch.get("name", "")
     char_cfg = config.get("character", {})
 
     # ── Background ────────────────────────────────────────────────
@@ -321,28 +451,34 @@ def generate_shorts_thumbnail(
 
     draw = ImageDraw.Draw(canvas)
 
-    # ── Top-left badge ────────────────────────────────────────────
+    # ── Top-left episode badge + channel name ────────────────────
     BX, BY = 30, 34
-    SQ = 52
-    draw.rounded_rectangle([(BX, BY), (BX + SQ, BY + SQ)], radius=8, fill=(*accent, 255))
-    font_sq = _font(fp, 30)
-    sym = "▶"
-    sw, sh = _tw(draw, sym, font_sq), _th(draw, sym, font_sq)
-    draw.text((BX + (SQ - sw) // 2, BY + (SQ - sh) // 2), sym, font=font_sq, fill=(255, 255, 255))
-    font_badge = _font(fp, 28)
-    bw = _tw(draw, badge_label, font_badge)
-    bh = _th(draw, badge_label, font_badge)
-    cx = BX + SQ + 8
-    cw = bw + 24
-    draw.rounded_rectangle([(cx, BY), (cx + cw, BY + SQ)], radius=8, fill=(35, 35, 35, 240))
-    draw.text((cx + 12, BY + (SQ - bh) // 2), badge_label, font=font_badge, fill=(255, 255, 255))
+    ep_label_s = f"第{_get_and_increment_episode(channel_id + '_shorts')}回"
+    font_ep_s  = _font(fp, 40)
+    ep_w_s     = _tw(draw, ep_label_s, font_ep_s)
+    ep_h_s     = _th(draw, ep_label_s, font_ep_s)
+    ep_px_s, ep_py_s = 18, 10
+    ep_bw_s    = ep_w_s + ep_px_s * 2
+    ep_bh_s    = ep_h_s + ep_py_s * 2
+    draw.rounded_rectangle(
+        [(BX, BY), (BX + ep_bw_s, BY + ep_bh_s)],
+        radius=12, fill=(*accent, 255)
+    )
+    draw.text((BX + ep_px_s, BY + ep_py_s), ep_label_s, font=font_ep_s,
+              fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0, 80))
+    label_y_s = BY + ep_bh_s + 10
+    if channel_name:
+        font_ch_s = _font(fp, 28)
+        draw.text((BX, label_y_s), channel_name, font=font_ch_s,
+                  fill=(255, 255, 255, 210), stroke_width=3, stroke_fill=(0, 0, 0))
+        label_y_s += _th(draw, channel_name, font_ch_s) + 12
 
     # ── White card with title ─────────────────────────────────────
     hook, main_text = _extract_hook(title_text)
 
     CARD_L   = 48
     CARD_R   = W - 48
-    CARD_T   = BY + SQ + 30
+    CARD_T   = label_y_s + 10
     CARD_BOT = char_top - 30   # don't overlap character head
     PAD      = 36
     HOOK_H   = 68 if hook else 0
@@ -406,3 +542,417 @@ def generate_shorts_thumbnail(
     canvas.convert("RGB").save(output_path, "JPEG", quality=95)
     logger.info(f"Shorts thumbnail generated: {output_path}")
     return output_path
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Style-specific thumbnail renderers (all return RGBA Image)
+# ═══════════════════════════════════════════════════════════════
+
+def _glow_text(canvas: Image.Image, text: str, font,
+               x: int, y: int, glow_color: tuple, text_color: tuple,
+               glow_r: int = 14) -> Image.Image:
+    """Draw text with colored glow blob under a sharp layer."""
+    glow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    ImageDraw.Draw(glow).text((x, y), text, font=font, fill=(*glow_color, 220))
+    canvas = Image.alpha_composite(canvas, glow.filter(ImageFilter.GaussianBlur(glow_r)))
+    ImageDraw.Draw(canvas).text((x, y), text, font=font, fill=text_color,
+                                stroke_width=2, stroke_fill=(0, 0, 0))
+    return canvas
+
+
+def _bg_from_photo(bg_image_path: str, W: int, H: int,
+                   blur: int = 6, overlay_alpha: int = 185) -> Image.Image:
+    """Crop+blur a photo and add a dark overlay. Returns RGBA canvas."""
+    if bg_image_path and Path(bg_image_path).exists():
+        img = Image.open(bg_image_path).convert("RGBA")
+        ir, cr = img.width / img.height, W / H
+        if ir > cr:
+            nw, nh = int(H * ir), H
+        else:
+            nw, nh = W, int(W / ir)
+        img = img.resize((nw, nh), Image.LANCZOS)
+        lf, tp = (nw - W) // 2, (nh - H) // 2
+        img = img.crop((lf, tp, lf + W, tp + H))
+        img = img.filter(ImageFilter.GaussianBlur(blur))
+        ov = Image.new("RGBA", (W, H), (8, 10, 20, overlay_alpha))
+        return Image.alpha_composite(img, ov)
+    return None
+
+
+def _ep_badge(draw: ImageDraw.ImageDraw, fp: str, episode_label: str, accent: tuple,
+              bx: int, by: int, font_size: int = 38) -> tuple[int, int]:
+    """Draw episode badge. Returns (box_width, box_height)."""
+    font_ep = _font(fp, font_size)
+    ew = _tw(draw, episode_label, font_ep)
+    eh = _th(draw, episode_label, font_ep)
+    px, py = 14, 7
+    draw.rounded_rectangle([(bx, by), (bx + ew + px * 2, by + eh + py * 2)],
+                           radius=9, fill=(*accent, 255))
+    draw.text((bx + px, by + py), episode_label, font=font_ep,
+              fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0, 60))
+    return ew + px * 2, eh + py * 2
+
+
+def _ch_label(draw: ImageDraw.ImageDraw, fp: str, channel_name: str,
+              x: int, y: int, size: int = 24) -> int:
+    """Draw channel name. Returns height consumed."""
+    if not channel_name:
+        return 0
+    font_ch = _font(fp, size)
+    draw.text((x, y), channel_name, font=font_ch,
+              fill=(255, 255, 255, 205), stroke_width=3, stroke_fill=_TITLE_STROKE)
+    return _th(draw, channel_name, font_ch) + 10
+
+
+def _paste_chars_small(canvas: Image.Image, right_path: str, left_path: str,
+                       W: int, H: int,
+                       right_scale: float = 0.62, left_scale: float = 0.50) -> tuple:
+    """Paste smaller characters (for IMPACT). Returns (canvas, char_inner_x)."""
+    inner_x = W
+    if right_path and Path(right_path).exists():
+        img = Image.open(right_path).convert("RGBA")
+        bbox = img.getbbox()
+        if bbox:
+            img = img.crop(bbox)
+        th = int(H * right_scale)
+        tw = int(img.width * th / img.height)
+        img = img.resize((tw, th), Image.LANCZOS)
+        bleed = int(tw * 0.06)
+        zx = W - tw + bleed
+        canvas.paste(img, (zx, H - th), img)
+        inner_x = zx
+
+    if left_path and Path(left_path).exists():
+        img = Image.open(left_path).convert("RGBA")
+        bbox = img.getbbox()
+        if bbox:
+            img = img.crop(bbox)
+        th = int(H * left_scale)
+        tw = int(img.width * th / img.height)
+        img = img.resize((tw, th), Image.LANCZOS)
+        tx = inner_x - tw + int(tw * 0.15)
+        canvas.paste(img, (tx, H - th), img)
+        inner_x = tx
+    return canvas, inner_x
+
+
+# ── IMPACT ────────────────────────────────────────────────────
+def _render_impact(*, bg_image_path: str, title_text: str, reaction_text: str,
+                   W: int, H: int, fp: str, accent: tuple,
+                   episode_label: str, channel_name: str,
+                   right_path: str, left_path: str) -> Image.Image:
+    """Giant text spans full width, characters smaller in bottom-right corner."""
+    canvas = _bg_from_photo(bg_image_path, W, H, blur=10, overlay_alpha=210)
+    if canvas is None:
+        canvas = _make_dark_bg(W, H, accent)
+    # Bokeh on top
+    for rx, ry, r, color in _BOKEH_DARK:
+        blob = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(blob).ellipse(
+            [(int(W * rx) - r, int(H * ry) - r),
+             (int(W * rx) + r, int(H * ry) + r)], fill=color)
+        canvas = Image.alpha_composite(canvas, blob.filter(ImageFilter.GaussianBlur(r // 1.4)))
+
+    canvas, _ = _paste_chars_small(canvas, right_path, left_path, W, H, 0.62, 0.50)
+
+    draw = ImageDraw.Draw(canvas)
+
+    # Tiny episode badge top-left
+    BX, BY = 22, 18
+    bw, bh = _ep_badge(draw, fp, episode_label, accent, BX, BY, font_size=28)
+    TITLE_Y = BY + bh + 14
+
+    # HUGE title — spans near-full width
+    hook, main_text = _extract_hook(title_text)
+    TX, MAX_TW = 22, W - 100
+    if hook:
+        font_hook = _font(fp, 40)
+        hw, hh = _tw(draw, hook, font_hook), _th(draw, hook, font_hook)
+        draw.rounded_rectangle([(TX, TITLE_Y), (TX + hw + 28, TITLE_Y + hh + 12)],
+                               radius=7, fill=(*accent, 255))
+        draw.text((TX + 14, TITLE_Y + 6), hook, font=font_hook, fill=(255, 255, 255))
+        TITLE_Y += hh + 24
+
+    for size in (150, 130, 110, 92, 78, 64):
+        ft = _font(fp, size)
+        lines = _wrap_px(draw, main_text, ft, MAX_TW)
+        lh = max((_th(draw, ln, ft) for ln in lines), default=size) + 8
+        if len(lines) <= 4 and TITLE_Y + lh * len(lines) <= H - 40:
+            font_title = ft
+            break
+    else:
+        font_title = _font(fp, 64)
+        lines = _wrap_px(draw, main_text, font_title, MAX_TW)
+
+    lh = max((_th(draw, ln, font_title) for ln in lines), default=60) + 8
+    ty = TITLE_Y
+    for ln in lines:
+        _draw_mixed_line(draw, ln, font_title, TX, ty, (255, 255, 255), accent, stroke_width=10)
+        ty += lh
+
+    draw.rectangle([(0, H - 6), (W, H)], fill=(*accent, 255))
+    return canvas
+
+
+# ── NEON ──────────────────────────────────────────────────────
+_NEON_BG = (4, 4, 18)
+
+def _render_neon(*, bg_image_path: str, title_text: str, reaction_text: str,
+                 W: int, H: int, fp: str, accent: tuple,
+                 episode_label: str, channel_name: str,
+                 right_path: str, left_path: str) -> Image.Image:
+    """Near-black background, glowing accent text, character with edge light."""
+    canvas = Image.new("RGBA", (W, H), (*_NEON_BG, 255))
+    # Neon bokeh — alternate accent vs channel-shifted complementary
+    for i, (rx, ry, r, _) in enumerate(_BOKEH_DARK):
+        blob = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        col = (*accent, 90) if i % 2 == 0 else (accent[2], accent[0], accent[1], 70)
+        ImageDraw.Draw(blob).ellipse(
+            [(int(W * rx) - r, int(H * ry) - r),
+             (int(W * rx) + r, int(H * ry) + r)], fill=col)
+        canvas = Image.alpha_composite(canvas, blob.filter(ImageFilter.GaussianBlur(r // 1.2)))
+
+    # Subtle horizontal scan lines
+    scan = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(scan)
+    for y in range(0, H, 4):
+        sd.line([(0, y), (W, y)], fill=(*accent, 6))
+    canvas = Image.alpha_composite(canvas, scan)
+
+    canvas, char_inner_x = _paste_chars_dark(canvas, right_path, left_path, W, H)
+
+    # Colored edge glow behind character area
+    glow_stripe = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(glow_stripe).rectangle(
+        [(char_inner_x - 30, 0), (W, H)], fill=(*accent, 28))
+    canvas = Image.alpha_composite(
+        canvas, glow_stripe.filter(ImageFilter.GaussianBlur(30)))
+
+    draw = ImageDraw.Draw(canvas)
+
+    # Episode badge
+    BX, BY = 30, 26
+    bw, bh = _ep_badge(draw, fp, episode_label, accent, BX, BY)
+    label_y = BY + bh + 8
+    label_y += _ch_label(draw, fp, channel_name, BX, label_y, size=24)
+
+    # Neon glow title
+    hook, main_text = _extract_hook(title_text)
+    TX, TITLE_Y = 54, label_y
+    MAX_TW = char_inner_x - TX - 30
+    if hook:
+        font_hook = _font(fp, 40)
+        hw, hh = _tw(draw, hook, font_hook), _th(draw, hook, font_hook)
+        draw.rounded_rectangle([(TX, TITLE_Y), (TX + hw + 28, TITLE_Y + hh + 12)],
+                               radius=7, fill=(*accent, 255))
+        draw.text((TX + 14, TITLE_Y + 6), hook, font=font_hook, fill=(255, 255, 255))
+        TITLE_Y += hh + 22
+
+    for size in (110, 94, 80, 66, 54, 44):
+        ft = _font(fp, size)
+        lines = _wrap_px(draw, main_text, ft, MAX_TW)
+        lh = max((_th(draw, ln, ft) for ln in lines), default=size) + 12
+        if len(lines) <= 3 and TITLE_Y + lh * len(lines) <= H - 60:
+            font_title = ft
+            break
+    else:
+        font_title = _font(fp, 44)
+        lines = _wrap_px(draw, main_text, font_title, MAX_TW)
+
+    lh = max((_th(draw, ln, font_title) for ln in lines), default=52) + 12
+    ty = TITLE_Y
+    for ln in lines:
+        # Glow blob under each line
+        glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(glow).text((TX, ty), ln, font=font_title, fill=(*accent, 200))
+        canvas = Image.alpha_composite(canvas, glow.filter(ImageFilter.GaussianBlur(14)))
+        draw = ImageDraw.Draw(canvas)
+        _draw_mixed_line(draw, ln, font_title, TX, ty, (255, 255, 255), accent, stroke_width=3)
+        ty += lh
+
+    # Speech bubble
+    if reaction_text and reaction_text.strip():
+        font_bub = _font(fp, 30)
+        tmp_d = ImageDraw.Draw(canvas)
+        bub_w = _tw(tmp_d, reaction_text.strip(), font_bub) + 40
+        bub_x = max(char_inner_x, W - bub_w - 20)
+        canvas = _draw_speech_bubble(canvas, reaction_text.strip(), font_bub, bub_x, 26, accent)
+        draw = ImageDraw.Draw(canvas)
+
+    draw.rectangle([(0, H - 6), (W, H)], fill=(*accent, 255))
+    return canvas
+
+
+# ── CARD ──────────────────────────────────────────────────────
+def _render_card(*, bg_image_path: str, title_text: str, reaction_text: str,
+                 W: int, H: int, fp: str, accent: tuple,
+                 episode_label: str, channel_name: str,
+                 right_path: str, left_path: str) -> Image.Image:
+    """Bright accent-color background, white card left, dark text, chars right."""
+    # Bright accent background with diagonal stripe texture
+    canvas = Image.new("RGBA", (W, H), (*accent, 255))
+    pattern = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    pd = ImageDraw.Draw(pattern)
+    darker = tuple(max(0, c - 35) for c in accent[:3])
+    for i in range(-W, W + H, 55):
+        pd.polygon([(i, 0), (i + 38, 0), (i + 38 + H, H), (i + H, H)],
+                   fill=(*darker, 255))
+    canvas = Image.alpha_composite(canvas, pattern)
+    # Slight dark overlay on right half (character area)
+    right_overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(right_overlay).rectangle(
+        [(W // 2, 0), (W, H)], fill=(0, 0, 0, 50))
+    canvas = Image.alpha_composite(canvas, right_overlay)
+
+    canvas, char_inner_x = _paste_chars_dark(canvas, right_path, left_path, W, H)
+
+    # White card on left side
+    CARD_L, CARD_T = 20, 18
+    CARD_R = min(char_inner_x + 45, int(W * 0.60))
+    CARD_B = H - 18
+    shadow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow_layer).rounded_rectangle(
+        [(CARD_L + 8, CARD_T + 10), (CARD_R + 8, CARD_B + 10)],
+        radius=22, fill=(0, 0, 0, 55))
+    canvas = Image.alpha_composite(canvas, shadow_layer.filter(ImageFilter.GaussianBlur(14)))
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle([(CARD_L, CARD_T), (CARD_R, CARD_B)],
+                           radius=22, fill=(255, 255, 255, 238))
+    # Accent left border on card
+    draw.rounded_rectangle([(CARD_L, CARD_T), (CARD_L + 8, CARD_B)],
+                           radius=6, fill=(*accent, 255))
+
+    # Episode badge inside card
+    BX, BY = CARD_L + 22, CARD_T + 22
+    bw, bh = _ep_badge(draw, fp, episode_label, accent, BX, BY, font_size=36)
+    label_y = BY + bh + 8
+
+    # Channel name in accent color on card
+    if channel_name:
+        font_ch = _font(fp, 22)
+        draw.text((BX, label_y), channel_name, font=font_ch, fill=(*accent, 255))
+        label_y += _th(draw, channel_name, font_ch) + 12
+
+    # Title — dark text on white card
+    _DARK_TEXT = (18, 22, 44)
+    hook, main_text = _extract_hook(title_text)
+    TX, TITLE_Y = BX, label_y
+    MAX_TW = CARD_R - TX - 24
+    if hook:
+        font_hook = _font(fp, 36)
+        hw, hh = _tw(draw, hook, font_hook), _th(draw, hook, font_hook)
+        draw.rounded_rectangle([(TX, TITLE_Y), (TX + hw + 24, TITLE_Y + hh + 10)],
+                               radius=7, fill=(*accent, 255))
+        draw.text((TX + 12, TITLE_Y + 5), hook, font=font_hook, fill=(255, 255, 255))
+        TITLE_Y += hh + 22
+
+    for size in (88, 74, 62, 52, 44, 36):
+        ft = _font(fp, size)
+        lines = _wrap_px(draw, main_text, ft, MAX_TW)
+        lh = max((_th(draw, ln, ft) for ln in lines), default=size) + 10
+        if len(lines) <= 4 and TITLE_Y + lh * len(lines) <= CARD_B - 24:
+            font_title = ft
+            break
+    else:
+        font_title = _font(fp, 36)
+        lines = _wrap_px(draw, main_text, font_title, MAX_TW)
+
+    lh = max((_th(draw, ln, font_title) for ln in lines), default=44) + 10
+    ty = TITLE_Y
+    for ln in lines:
+        _draw_mixed_line(draw, ln, font_title, TX, ty, _DARK_TEXT, accent, stroke_width=0)
+        ty += lh
+
+    # Speech bubble
+    if reaction_text and reaction_text.strip():
+        font_bub = _font(fp, 30)
+        tmp_d = ImageDraw.Draw(canvas)
+        bub_w = _tw(tmp_d, reaction_text.strip(), font_bub) + 40
+        bub_x = max(char_inner_x, W - bub_w - 20)
+        canvas = _draw_speech_bubble(canvas, reaction_text.strip(), font_bub, bub_x, 26, accent)
+
+    return canvas
+
+
+# ── BAND ──────────────────────────────────────────────────────
+def _render_band(*, bg_image_path: str, title_text: str, reaction_text: str,
+                 W: int, H: int, fp: str, accent: tuple,
+                 episode_label: str, channel_name: str,
+                 right_path: str, left_path: str) -> Image.Image:
+    """Dark bg + thick left accent stripe, title vertically centered — bold graphic design."""
+    canvas = _bg_from_photo(bg_image_path, W, H, blur=6, overlay_alpha=180)
+    if canvas is None:
+        canvas = _make_dark_bg(W, H, accent)
+    # Extra bokeh for depth
+    for rx, ry, r, color in _BOKEH_DARK:
+        blob = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(blob).ellipse(
+            [(int(W * rx) - r, int(H * ry) - r),
+             (int(W * rx) + r, int(H * ry) + r)], fill=color)
+        canvas = Image.alpha_composite(canvas, blob.filter(ImageFilter.GaussianBlur(r // 1.4)))
+
+    canvas, char_inner_x = _paste_chars_dark(canvas, right_path, left_path, W, H)
+
+    draw = ImageDraw.Draw(canvas)
+
+    # Bold left accent band (full height)
+    BAND_W = 14
+    draw.rectangle([(0, 0), (BAND_W, H)], fill=(*accent, 255))
+    # Top + bottom stripes
+    draw.rectangle([(0, 0), (W, 5)], fill=(*accent, 255))
+    draw.rectangle([(0, H - 5), (W, H)], fill=(*accent, 255))
+
+    # Episode badge next to band
+    BX, BY = BAND_W + 18, 24
+    bw, bh = _ep_badge(draw, fp, episode_label, accent, BX, BY, font_size=36)
+    label_y = BY + bh + 8
+    label_y += _ch_label(draw, fp, channel_name, BX, label_y, size=22)
+
+    # Title — vertically centered in remaining space
+    hook, main_text = _extract_hook(title_text)
+    TX = BAND_W + 18
+    MAX_TW = char_inner_x - TX - 30
+
+    for size in (110, 94, 80, 66, 54, 44):
+        ft = _font(fp, size)
+        lines = _wrap_px(draw, main_text, ft, MAX_TW)
+        lh = max((_th(draw, ln, ft) for ln in lines), default=size) + 14
+        total_h = lh * len(lines)
+        avail = H - 30 - label_y
+        if len(lines) <= 4 and total_h <= avail:
+            font_title = ft
+            break
+    else:
+        font_title = _font(fp, 44)
+        lines = _wrap_px(draw, main_text, font_title, MAX_TW)
+        lh = max((_th(draw, ln, font_title) for ln in lines), default=44) + 14
+        total_h = lh * len(lines)
+
+    avail = H - 30 - label_y
+    TITLE_Y = label_y + max(0, (avail - total_h) // 2)
+
+    if hook:
+        font_hook = _font(fp, 38)
+        hw, hh = _tw(draw, hook, font_hook), _th(draw, hook, font_hook)
+        hy = TITLE_Y - hh - 20
+        if hy > label_y:
+            draw.rounded_rectangle([(TX, hy - 8), (TX + hw + 28, hy + hh + 8)],
+                                   radius=7, fill=(*accent, 255))
+            draw.text((TX + 14, hy), hook, font=font_hook, fill=(255, 255, 255))
+
+    lh_actual = max((_th(draw, ln, font_title) for ln in lines), default=52) + 14
+    ty = TITLE_Y
+    for ln in lines:
+        _draw_mixed_line(draw, ln, font_title, TX, ty, (255, 255, 255), accent, stroke_width=5)
+        ty += lh_actual
+
+    # Speech bubble
+    if reaction_text and reaction_text.strip():
+        font_bub = _font(fp, 30)
+        tmp_d = ImageDraw.Draw(canvas)
+        bub_w = _tw(tmp_d, reaction_text.strip(), font_bub) + 40
+        bub_x = max(char_inner_x, W - bub_w - 20)
+        canvas = _draw_speech_bubble(canvas, reaction_text.strip(), font_bub, bub_x, 26, accent)
+        draw = ImageDraw.Draw(canvas)
+
+    return canvas

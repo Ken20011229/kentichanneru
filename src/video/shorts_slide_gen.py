@@ -1,5 +1,11 @@
-"""shorts_slide_gen.py — Generate 1080×1920 vertical slides for YouTube Shorts."""
+"""shorts_slide_gen.py — Two-layer 1080×1920 vertical slides for YouTube Shorts.
 
+generate_shorts_slides() returns (plate_paths, content_paths):
+  plate_paths   — static chrome frames (character fixed at bottom, badge, stripe)
+  content_paths — animated content images in the upper content zone, or None for intro
+
+Content zone: x=0, y=CONTENT_Y1, w=1080, h=CONTENT_H (above the character)
+"""
 import logging
 import os
 from pathlib import Path
@@ -9,7 +15,25 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 logger = logging.getLogger(__name__)
 
 W, H = 1080, 1920
-BG_COLOR = (252, 247, 238)
+BG_COLOR     = (252, 247, 238)
+_DARK_BG     = (18, 18, 28)
+_COLOR_WHITE = (255, 255, 255)
+_DEFAULT_ACCENT = (245, 166, 35)
+
+# Character at bottom
+_CHAR_RATIO = 0.63
+_CHAR_H     = int(H * _CHAR_RATIO)   # 1209px
+_CHAR_TOP   = H - _CHAR_H - 4        # 707px
+
+# Content area (above character)
+CONTENT_X1 = 0
+CONTENT_Y1 = 108
+CONTENT_X2 = W
+CONTENT_Y2 = _CHAR_TOP - 16          # 691px
+CONTENT_W  = W                        # 1080
+CONTENT_H  = CONTENT_Y2 - CONTENT_Y1  # 583px
+
+_BADGE_TOP = 35
 
 DECO_CIRCLES = [
     (0.12, 0.08, 130, (245, 200, 90,  55)),
@@ -19,16 +43,10 @@ DECO_CIRCLES = [
     (0.50, 0.03,  70, (180, 230, 180, 35)),
 ]
 
-_COLOR_DARK    = (40,  40,  50)
-_COLOR_WHITE   = (255, 255, 255)
-_DEFAULT_ACCENT = (245, 166, 35)
 _SECTION_LABELS = ["はじめに", "概要", "解説", "詳細", "まとめ"]
 
-_CHAR_RATIO    = 0.63
-_CHAR_H        = int(H * _CHAR_RATIO)   # 1209px
-_CHAR_TOP      = H - _CHAR_H - 4        # 707px — character head Y
-_CONTENT_BOTTOM = _CHAR_TOP - 20        # 687px — max Y for text cards
 
+# ── Utilities ──────────────────────────────────────────────────────────────────
 
 def _font(path, size):
     try:
@@ -38,8 +56,7 @@ def _font(path, size):
 
 
 def _tw(draw, text, font):
-    bb = draw.textbbox((0, 0), text, font=font)
-    return bb[2] - bb[0]
+    return draw.textbbox((0, 0), text, font=font)[2]
 
 
 def _th(draw, text, font):
@@ -61,43 +78,44 @@ def _wrap_px(draw, text, font, max_w):
     return lines
 
 
-def _photo_bg(path: str) -> Image.Image:
+# ── Background builders ────────────────────────────────────────────────────────
+
+def _photo_bg(path, blur=14, overlay_alpha=160):
     try:
         img = Image.open(path).convert("RGBA")
-        ir = img.width / img.height
-        cr = W / H
-        if ir > cr:
-            nw, nh = int(H * ir), H
-        else:
-            nw, nh = W, int(W / ir)
-        img = img.resize((nw, nh), Image.LANCZOS)
-        left, top = (nw - W) // 2, (nh - H) // 2
-        img = img.crop((left, top, left + W, top + H))
-        img = img.filter(ImageFilter.GaussianBlur(radius=14))
-        return Image.alpha_composite(img, Image.new("RGBA", (W, H), (252, 247, 238, 165)))
+        ir  = img.width / img.height
+        cr  = W / H
+        nw, nh = (int(H * ir), H) if ir > cr else (W, int(W / ir))
+        img  = img.resize((nw, nh), Image.LANCZOS)
+        img  = img.crop(((nw - W) // 2, (nh - H) // 2,
+                         (nw - W) // 2 + W, (nh - H) // 2 + H))
+        img  = img.filter(ImageFilter.GaussianBlur(radius=blur))
+        return Image.alpha_composite(img, Image.new("RGBA", (W, H), (*BG_COLOR, overlay_alpha)))
     except Exception as e:
-        logger.warning(f"Shorts photo background failed: {e}")
+        logger.warning(f"Photo bg failed: {e}")
         return Image.new("RGBA", (W, H), (*BG_COLOR, 255))
 
 
-def _make_bg(bg_image_path: str = None):
+def _make_base_bg(bg_image_path=None):
     deco = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(deco)
+    d    = ImageDraw.Draw(deco)
     for rx, ry, r, color in DECO_CIRCLES:
         cx, cy = int(W * rx), int(H * ry)
         d.ellipse([(cx - r, cy - r), (cx + r, cy + r)], fill=color)
-    deco = deco.filter(ImageFilter.GaussianBlur(radius=28))
+    deco   = deco.filter(ImageFilter.GaussianBlur(radius=28))
     canvas = _photo_bg(bg_image_path) if bg_image_path else Image.new("RGBA", (W, H), (*BG_COLOR, 255))
     canvas = Image.alpha_composite(canvas, deco)
-    rule = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    rd = ImageDraw.Draw(rule)
+    rule   = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    rd     = ImageDraw.Draw(rule)
     for y in range(0, H, 32):
         rd.line([(0, y), (W, y)], fill=(180, 165, 140, 14))
     return Image.alpha_composite(canvas, rule)
 
 
+# ── Character helpers ──────────────────────────────────────────────────────────
+
 def _paste_char(canvas, path, side="right"):
-    """Paste single character at bottom of vertical slide with auto-crop."""
+    """Paste character at fixed bottom position — no animation."""
     if not path or not Path(path).exists():
         return canvas
     try:
@@ -111,27 +129,16 @@ def _paste_char(canvas, path, side="right"):
         target_w = int(img.width * ratio)
         img      = img.resize((target_w, _CHAR_H), Image.LANCZOS)
         bleed    = int(target_w * 0.08)
-        if side == "right":
-            char_x = W - target_w + bleed
-        elif side == "left":
-            char_x = -bleed
-        else:
-            char_x = (W - target_w) // 2
-        char_y = H - _CHAR_H - 4
-        canvas.paste(img, (char_x, char_y), img)
+        char_x   = W - target_w + bleed if side == "right" else -bleed
+        canvas.paste(img, (char_x, H - _CHAR_H - 4), img)
     except Exception as e:
-        logger.warning(f"Vertical char paste failed ({side}): {e}")
+        logger.warning(f"Char paste failed ({side}): {e}")
     return canvas
 
 
-def _shadow(canvas, x1, y1, x2, y2, radius=18):
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    d.rounded_rectangle([(x1 + 6, y1 + 9), (x2 + 6, y2 + 9)], radius=radius, fill=(0, 0, 0, 38))
-    return Image.alpha_composite(canvas, layer.filter(ImageFilter.GaussianBlur(12)))
+# ── Chrome drawers ─────────────────────────────────────────────────────────────
 
-
-def _draw_badge(draw, fp, accent, sec_num, label, x=30, y=35):
+def _draw_badge(draw, fp, accent, sec_num, label, x=30, y=_BADGE_TOP):
     SQ       = 52
     font_sq  = _font(fp, 30)
     font_lbl = _font(fp, 28)
@@ -152,15 +159,183 @@ def _draw_accent_stripe(draw, accent):
     draw.rectangle([(0, H - 8), (W, H)], fill=(*accent, 255))
 
 
+def _draw_content_border(draw, accent):
+    """Subtle border around the content area on the plate."""
+    draw.rounded_rectangle(
+        [(CONTENT_X1 + 4, CONTENT_Y1 - 3), (CONTENT_X2 - 4, CONTENT_Y2 + 3)],
+        radius=16, outline=(*accent, 55), width=2,
+    )
+
+
+# ── Frame plate builders ───────────────────────────────────────────────────────
+
+def _plate_intro(fp, accent, keyword, text, badge_label, char_path, side,
+                 bg_image_path=None) -> Image.Image:
+    """INTRO plate: accent gradient + large keyword as title. Self-contained, no content overlay."""
+    canvas = Image.new("RGBA", (W, H), (*_DARK_BG, 255))
+
+    # Subtle accent glow
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd   = ImageDraw.Draw(glow)
+    r, g, b = accent
+    gd.ellipse([(-100, -100), (W + 100, H // 2)], fill=(r, g, b, 28))
+    canvas = Image.alpha_composite(canvas, glow.filter(ImageFilter.GaussianBlur(80)))
+
+    canvas = _paste_char(canvas, char_path, side=side)
+    draw   = ImageDraw.Draw(canvas)
+
+    cur_y = CONTENT_Y1
+    if keyword:
+        for sz in (110, 92, 78, 64, 52):
+            fk = _font(fp, sz)
+            if _tw(draw, keyword, fk) <= W - 60:
+                break
+        kw_w = _tw(draw, keyword, fk)
+        kw_h = _th(draw, keyword, fk)
+        kx   = (W - kw_w) // 2
+        draw.text((kx + 4, cur_y + 4), keyword, font=fk, fill=(0, 0, 0, 140))
+        draw.text((kx, cur_y), keyword, font=fk, fill=_COLOR_WHITE)
+        uy = cur_y + kw_h + 8
+        draw.rectangle([(kx, uy), (kx + kw_w, uy + 6)], fill=(*accent, 255))
+        cur_y = uy + 28
+
+    # Narration preview (subtitle will show actual text)
+    if text:
+        font_sub  = _font(fp, 38)
+        sub_lines = _wrap_px(draw, text, font_sub, W - 80)[:2]
+        for ln in sub_lines:
+            draw.text((40, cur_y), ln, font=font_sub, fill=(190, 195, 210, 180))
+            cur_y += _th(draw, ln, font_sub) + 12
+
+    draw.rectangle([(0, 0), (W, 5)],     fill=(*accent, 255))
+    draw.rectangle([(0, H - 8), (W, H)], fill=(*accent, 255))
+    return canvas.convert("RGB")
+
+
+def _plate_standard(fp, accent, sec_num, sec_label,
+                    char_path, side, bg_image_path=None) -> Image.Image:
+    """Standard plate: background + character fixed + badge + content border + stripe."""
+    canvas = _make_base_bg(bg_image_path)
+    canvas = _paste_char(canvas, char_path, side=side)
+    draw   = ImageDraw.Draw(canvas)
+    _draw_badge(draw, fp, accent, sec_num, sec_label)
+    _draw_content_border(draw, accent)
+    _draw_accent_stripe(draw, accent)
+    return canvas.convert("RGB")
+
+
+# ── Content image builders ─────────────────────────────────────────────────────
+
+def _content_from_image(image_path: str) -> Image.Image:
+    """Load and fit an image into the Shorts content area dimensions."""
+    img = Image.open(image_path).convert("RGB")
+    ir  = img.width / img.height
+    cr  = CONTENT_W / CONTENT_H
+    if ir > cr:
+        nw, nh = int(CONTENT_H * ir), CONTENT_H
+    else:
+        nw, nh = CONTENT_W, int(CONTENT_W / ir)
+    img = img.resize((nw, nh), Image.LANCZOS)
+    l, t = (nw - CONTENT_W) // 2, (nh - CONTENT_H) // 2
+    return img.crop((l, t, l + CONTENT_W, t + CONTENT_H))
+
+
+def _content_keyword(fp, keyword, accent, sec_num, sec_label) -> Image.Image:
+    """Keyword graphic for Shorts content area."""
+    r, g, b = accent
+    img = Image.new("RGBA", (CONTENT_W, CONTENT_H), (18, 20, 32, 255))
+
+    glow = Image.new("RGBA", (CONTENT_W, CONTENT_H), (0, 0, 0, 0))
+    gd   = ImageDraw.Draw(glow)
+    gd.ellipse([(-40, -40), (CONTENT_W + 40, CONTENT_H // 2 + 40)], fill=(r, g, b, 24))
+    img  = Image.alpha_composite(img, glow.filter(ImageFilter.GaussianBlur(70)))
+    draw = ImageDraw.Draw(img)
+
+    # Keyword centered
+    avail_w = CONTENT_W - 60
+    avail_h = CONTENT_H - 100
+    for size in (140, 114, 92, 76, 62, 50):
+        fk  = _font(fp, size)
+        ls  = _wrap_px(draw, keyword, fk, avail_w)
+        lh  = max((_th(draw, ln, fk) for ln in ls), default=size) + 18
+        if lh * len(ls) <= avail_h and len(ls) <= 3:
+            font_kw, kw_lines = fk, ls
+            break
+    else:
+        font_kw  = _font(fp, 50)
+        kw_lines = _wrap_px(draw, keyword, font_kw, avail_w)
+
+    kw_lh    = max((_th(draw, ln, font_kw) for ln in kw_lines), default=55) + 18
+    total_kh = kw_lh * len(kw_lines)
+    ty       = (CONTENT_H - total_kh) // 2
+
+    for ln in kw_lines:
+        g_layer = Image.new("RGBA", (CONTENT_W, CONTENT_H), (0, 0, 0, 0))
+        ImageDraw.Draw(g_layer).text((30, ty), ln, font=font_kw, fill=(*accent, 150))
+        img  = Image.alpha_composite(img, g_layer.filter(ImageFilter.GaussianBlur(16)))
+        draw = ImageDraw.Draw(img)
+        draw.text((30, ty), ln, font=font_kw, fill=_COLOR_WHITE,
+                  stroke_width=2, stroke_fill=(0, 0, 0, 80))
+        ty += kw_lh
+
+    draw.rectangle([(0, CONTENT_H - 6), (CONTENT_W, CONTENT_H)], fill=(*accent, 255))
+    return img.convert("RGB")
+
+
+def _content_section(fp, accent, section_num, sec_label) -> Image.Image:
+    """Minimal section graphic for Shorts content area."""
+    r, g, b = accent
+    img  = Image.new("RGBA", (CONTENT_W, CONTENT_H), (18, 20, 32, 255))
+    draw = ImageDraw.Draw(img)
+
+    for size in (240, 200, 170):
+        ft = _font(fp, size)
+        if _tw(draw, str(section_num), ft) < CONTENT_W - 40:
+            font_ghost = ft
+            break
+    else:
+        font_ghost = _font(fp, 170)
+
+    ns   = str(section_num)
+    nw_n = _tw(draw, ns, font_ghost)
+    nh_n = _th(draw, ns, font_ghost)
+    ghost = Image.new("RGBA", (CONTENT_W, CONTENT_H), (0, 0, 0, 0))
+    ImageDraw.Draw(ghost).text(
+        ((CONTENT_W - nw_n) // 2, (CONTENT_H - nh_n) // 2),
+        ns, font=font_ghost, fill=(r, g, b, 18),
+    )
+    img  = Image.alpha_composite(img, ghost.filter(ImageFilter.GaussianBlur(6)))
+    draw = ImageDraw.Draw(img)
+
+    font_label = _font(fp, 56)
+    lw = _tw(draw, sec_label, font_label)
+    lh = _th(draw, sec_label, font_label)
+    draw.text(((CONTENT_W - lw) // 2, (CONTENT_H - lh) // 2),
+              sec_label, font=font_label, fill=(*accent, 255))
+    draw.rectangle([(0, CONTENT_H - 6), (CONTENT_W, CONTENT_H)], fill=(*accent, 255))
+    return img.convert("RGB")
+
+
+# ── Public entry point ────────────────────────────────────────────────────────
+
 def generate_shorts_slides(
     segments: list[dict],
     title: str,
     config: dict,
     output_dir: str,
     bg_image_path: str = None,
-) -> list[str]:
-    """Generate one 1080×1920 slide per Shorts segment. Returns list of paths."""
+    segment_images: dict | None = None,
+) -> tuple[list[str], list[str | None]]:
+    """Generate Shorts frame plates and content images.
+
+    Returns (plate_paths, content_paths) — same pattern as generate_slides().
+    """
     os.makedirs(output_dir, exist_ok=True)
+    plates_dir  = os.path.join(output_dir, "plates")
+    content_dir = os.path.join(output_dir, "content")
+    os.makedirs(plates_dir,  exist_ok=True)
+    os.makedirs(content_dir, exist_ok=True)
+
     fp          = config.get("thumbnail", {}).get("font_path", "")
     ch          = config.get("active_channel", {})
     accent      = tuple(ch.get("accent_color", list(_DEFAULT_ACCENT)))
@@ -169,95 +344,58 @@ def generate_shorts_slides(
     right_path  = char_cfg.get("image_path", "")
     left_path   = char_cfg.get("left_image_path", "")
 
-    total  = max(len(segments), 1)
-    PAD_X  = 55   # horizontal padding for text card
-    PAD_Y  = 42   # inner vertical padding
+    seg_imgs = segment_images or {}
+    total    = max(len(segments), 1)
+    plate_paths   = []
+    content_paths = []
 
-    paths = []
     for idx, seg in enumerate(segments):
-        text    = seg.get("text", "")
         keyword = seg.get("keyword", "")
-        speaker = seg.get("speaker_side", "right" if idx % 2 == 0 else "left")
+        vtype   = seg.get("visual_type", "detail")
+        if idx == 0:
+            vtype = "intro"
+        side    = "right" if idx % 2 == 0 else "left"
+        char_p  = right_path if side == "right" else left_path
 
-        s = min(int(idx * len(_SECTION_LABELS) / total), len(_SECTION_LABELS) - 1)
-        sec_num    = s + 1
-        sec_label  = _SECTION_LABELS[s]
-        slide_label = badge_label if idx == 0 else sec_label
+        s         = min(int(idx * len(_SECTION_LABELS) / total), len(_SECTION_LABELS) - 1)
+        sec_num   = s + 1
+        sec_label = badge_label if idx == 0 else _SECTION_LABELS[s]
+        seg_img   = seg_imgs.get(idx)
 
-        canvas = _make_bg(bg_image_path)
+        plate_path   = os.path.join(plates_dir,  f"plate_{idx:03d}.jpg")
+        content_path = os.path.join(content_dir, f"content_{idx:03d}.jpg")
 
-        # Character at bottom (single character, matching speaker)
-        char_path = right_path if speaker == "right" else left_path
-        canvas = _paste_char(canvas, char_path, side=speaker)
+        try:
+            if vtype == "intro":
+                plate = _plate_intro(fp, accent, keyword, seg.get("text", ""),
+                                     sec_label, char_p, side, bg_image_path)
+                plate.save(plate_path, "JPEG", quality=93)
+                plate_paths.append(plate_path)
+                content_paths.append(None)
+            else:
+                plate = _plate_standard(fp, accent, sec_num, sec_label,
+                                        char_p, side, bg_image_path)
+                plate.save(plate_path, "JPEG", quality=93)
+                plate_paths.append(plate_path)
 
-        draw = ImageDraw.Draw(canvas)
-        _draw_badge(draw, fp, accent, sec_num, slide_label)
+                if seg_img and Path(seg_img).exists():
+                    c_img = _content_from_image(seg_img)
+                elif keyword:
+                    c_img = _content_keyword(fp, keyword, accent, sec_num, sec_label)
+                else:
+                    c_img = _content_section(fp, accent, sec_num, sec_label)
 
-        cur_y = 110
+                c_img.save(content_path, "JPEG", quality=93)
+                content_paths.append(content_path)
 
-        # Keyword hero box
-        if keyword:
-            max_kw_w = W - PAD_X * 2 - 20
-            fk = _font(fp, 70)
-            for size in (100, 82, 70, 58, 48):
-                fk = _font(fp, size)
-                if _tw(draw, keyword, fk) <= max_kw_w:
-                    break
-            kw_w = _tw(draw, keyword, fk)
-            kw_h = _th(draw, keyword, fk)
-            kpx, kpy = 40, 18
-            bx  = (W - kw_w - kpx * 2) // 2
-            by  = cur_y
-            bw  = kw_w + kpx * 2
-            bh  = kw_h + kpy * 2
-            canvas = _shadow(canvas, bx, by, bx + bw, by + bh, radius=16)
-            draw   = ImageDraw.Draw(canvas)
-            draw.rounded_rectangle([(bx, by), (bx + bw, by + bh)], radius=16, fill=(*accent, 255))
-            draw.text((bx + kpx, by + kpy), keyword, font=fk, fill=_COLOR_WHITE)
-            cur_y = by + bh + 28
+        except Exception as e:
+            logger.error(f"Shorts slide {idx} failed ({vtype}): {e}")
+            fallback = Image.new("RGB", (W, H), _DARK_BG)
+            fallback.save(plate_path, "JPEG", quality=90)
+            plate_paths.append(plate_path)
+            _content_section(fp, accent, sec_num, sec_label).save(content_path, "JPEG", quality=90)
+            content_paths.append(content_path)
 
-        # Text card
-        card_x1 = PAD_X
-        card_x2 = W - PAD_X
-        card_y1 = cur_y
-        max_w   = card_x2 - card_x1 - PAD_Y * 2
-        avail_h = _CONTENT_BOTTOM - card_y1 - PAD_Y * 2
+        logger.info(f"Shorts slide {idx} [{vtype}]: plate + {'content' if content_paths[-1] else 'none'}")
 
-        chosen_font, lines = None, []
-        for size in (54, 46, 40, 34, 28, 24):
-            ft = _font(fp, size)
-            ls = _wrap_px(draw, text, ft, max_w)
-            lh = max((_th(draw, ln, ft) for ln in ls), default=size) + 14
-            if lh * len(ls) <= avail_h:
-                chosen_font, lines = ft, ls
-                break
-        if chosen_font is None:
-            chosen_font = _font(fp, 24)
-            lines = _wrap_px(draw, text, chosen_font, max_w)
-
-        lh     = max((_th(draw, ln, chosen_font) for ln in lines), default=24) + 14
-        card_h = lh * len(lines) + PAD_Y * 2
-        card_y2 = min(card_y1 + card_h, _CONTENT_BOTTOM)
-
-        canvas = _shadow(canvas, card_x1, card_y1, card_x2, card_y2)
-        draw   = ImageDraw.Draw(canvas)
-        draw.rounded_rectangle([(card_x1, card_y1), (card_x2, card_y2)],
-                                radius=22, fill=(255, 255, 255, 235))
-        draw.rounded_rectangle([(card_x1, card_y1), (card_x1 + 7, card_y2)],
-                                radius=5, fill=(*accent, 255))
-
-        ty = card_y1 + PAD_Y
-        for ln in lines:
-            if ty + lh > card_y2 - PAD_Y // 2:
-                break
-            draw.text((card_x1 + PAD_Y + 7, ty), ln, font=chosen_font, fill=_COLOR_DARK)
-            ty += lh
-
-        _draw_accent_stripe(draw, accent)
-
-        out_path = os.path.join(output_dir, f"shorts_slide_{idx:03d}.jpg")
-        canvas.convert("RGB").save(out_path, "JPEG", quality=93)
-        paths.append(out_path)
-        logger.info(f"Shorts slide {idx} saved: {out_path}")
-
-    return paths
+    return plate_paths, content_paths

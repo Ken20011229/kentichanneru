@@ -4,21 +4,50 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-# Reliable Japanese news RSS feeds that reflect what's trending
+# Reliable Japanese news/trend RSS feeds — broad genre coverage
 _JP_TRENDING_FEEDS = [
-    ("https://news.yahoo.co.jp/rss/topics/top-picks.xml",     "Yahoo!ニュース 主要",  2.5),
-    ("https://news.yahoo.co.jp/rss/topics/domestic.xml",      "Yahoo!ニュース 国内",  2.2),
-    ("https://news.yahoo.co.jp/rss/topics/world.xml",         "Yahoo!ニュース 国際",  2.0),
-    ("https://news.yahoo.co.jp/rss/topics/entertainment.xml", "Yahoo!ニュース エンタメ", 1.8),
-    ("https://news.yahoo.co.jp/rss/topics/sports.xml",        "Yahoo!ニュース スポーツ", 1.8),
-    ("http://news.livedoor.com/topics/rss/top.xml",           "livedoor ニュース",    1.6),
-    ("https://www3.nhk.or.jp/rss/news/cat0.xml",              "NHK NEWS",            2.0),
+    # ── 総合ニュース ────────────────────────────────────────────────
+    ("https://news.yahoo.co.jp/rss/topics/top-picks.xml",     "Yahoo!ニュース 主要",       2.5),
+    ("https://news.yahoo.co.jp/rss/topics/domestic.xml",      "Yahoo!ニュース 国内",       2.2),
+    ("https://news.yahoo.co.jp/rss/topics/world.xml",         "Yahoo!ニュース 国際",       2.0),
+    ("https://www3.nhk.or.jp/rss/news/cat0.xml",              "NHK NEWS",                 2.0),
+    ("http://news.livedoor.com/topics/rss/top.xml",           "livedoor ニュース",         1.7),
+    # ── エンタメ・芸能 ─────────────────────────────────────────────
+    ("https://news.yahoo.co.jp/rss/topics/entertainment.xml", "Yahoo!ニュース エンタメ",   2.0),
+    ("https://natalie.mu/music/feed/news",                    "音楽ナタリー",              1.8),
+    ("https://natalie.mu/comic/feed/news",                    "コミックナタリー",          1.7),
+    ("https://natalie.mu/eiga/feed/news",                     "映画ナタリー",              1.6),
+    # ── スポーツ ────────────────────────────────────────────────────
+    ("https://news.yahoo.co.jp/rss/topics/sports.xml",        "Yahoo!ニュース スポーツ",   2.0),
+    # ── テクノロジー・IT ────────────────────────────────────────────
+    ("https://rss.itmedia.co.jp/rss/2.0/news_bursts.xml",     "ITmedia NEWS",             1.9),
+    ("https://gigazine.net/news/rss_2.0/",                    "GIGAZINE",                 1.8),
+    ("https://japan.cnet.com/rss/index.rdf",                  "CNET Japan",               1.7),
+    ("https://ascii.jp/rss.xml",                              "ASCII.jp",                 1.6),
+    # ── 科学・医療・健康 ────────────────────────────────────────────
+    ("https://news.yahoo.co.jp/rss/topics/science.xml",       "Yahoo!ニュース 科学",       1.8),
+    ("https://news.mynavi.jp/rss/index.rss",                  "Mynavi News",              1.6),
+    # ── 経済・ビジネス ──────────────────────────────────────────────
+    ("https://news.yahoo.co.jp/rss/topics/business.xml",      "Yahoo!ニュース 経済",       1.9),
+    ("https://toyokeizai.net/list/feed/rss",                  "東洋経済オンライン",        1.8),
+    # ── 映画 ────────────────────────────────────────────────────────
+    ("https://eiga.com/rss/news.rss",                         "映画.com",                 1.8),
+    ("https://www.cinemacafe.net/sys/feed/",                  "シネマカフェ",              1.6),
+    # ── アニメ・マンガ ──────────────────────────────────────────────
+    ("https://animeanime.jp/rss/index.rdf",                   "アニメ!アニメ!",            1.8),
+    # ── ゲーム ──────────────────────────────────────────────────────
+    ("https://www.4gamer.net/games/rss/4gamer_1024.rdf",      "4Gamer.net",               1.8),
+    ("https://game.watch.impress.co.jp/data/rss/1.0/gmw/feed.rdf", "Game Watch",          1.7),
+    # ── 旅行 ────────────────────────────────────────────────────────
+    ("https://tabizine.jp/feed/",                             "TABIZINE",                 1.6),
+    # ── 教育・学習 ──────────────────────────────────────────────────
+    ("https://resemom.jp/feed/",                              "ReseMom",                  1.6),
 ]
 
 
-def fetch_trending_jp(max_topics: int = 20) -> list[dict]:
+def fetch_trending_jp(max_topics: int = 80) -> list[dict]:
     """
-    Fetch trending JP topics from Yahoo News + livedoor RSS.
+    Fetch trending JP topics from diverse genre RSS feeds.
     These are more reliable than Google Trends API for production use.
     """
     import feedparser

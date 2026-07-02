@@ -4,6 +4,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from src.video.slide_gen import CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,7 +25,6 @@ def compose_audio(audio_segment_paths: list[str], output_path: str, ffmpeg: str 
 
 
 def _ensure_se(ffmpeg: str, se_path: str) -> bool:
-    """Generate a two-tone notification chime if the SE file is missing."""
     Path(se_path).parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         ffmpeg, "-y",
@@ -41,7 +42,8 @@ def _ensure_se(ffmpeg: str, se_path: str) -> bool:
 
 
 def render_video(
-    image_paths: list[str],
+    plate_paths: list[str],
+    content_paths: list[str | None],
     audio_segments: list[dict],
     bgm_path: str,
     subtitle_path: str,
@@ -51,42 +53,37 @@ def render_video(
     se_path: str = None,
     per_slide_durations: list[float] | None = None,
 ) -> str:
-    """Render final video.
+    """Render final video using a three-layer approach.
 
-    When per_slide_durations is provided, each slide uses its corresponding audio
-    duration and Ken Burns animation is replaced with a static scale filter.
-    Character overlay is also suppressed (assumed baked into slides).
+    plate_paths      — background + badge frames (no characters)
+    content_paths    — per-segment content images animated with zoompan (None = skip)
+    character_path   — static RGBA PNG overlaid permanently on top (never transitions)
+
+    Characters are composited last so they never move or fade between slides.
     """
-    ffmpeg       = config["video"].get("ffmpeg_path", "ffmpeg")
-    display_dur  = config["video"].get("display_duration_sec", 5)
-    fps          = config["video"].get("fps", 30)
-    resolution   = config["video"].get("resolution", "1920x1080")
-    bgm_vol      = config["video"].get("bgm_volume", 0.15)
-    fade_dur     = config["video"].get("xfade_duration", 0.5)
-    se_vol       = config.get("se", {}).get("volume", 0.70)
-    char_h       = config.get("character", {}).get("overlay_size", 480)
+    ffmpeg    = config["video"].get("ffmpeg_path", "ffmpeg")
+    fps       = config["video"].get("fps", 30)
+    resolution = config["video"].get("resolution", "1920x1080")
+    bgm_vol   = config["video"].get("bgm_volume", 0.15)
+    fade_dur  = config["video"].get("xfade_duration", 0.5)
+    se_vol    = config.get("se", {}).get("volume", 0.70)
+    display_dur = config["video"].get("display_duration_sec", 5)
 
-    total_dur    = sum(s["duration_sec"] for s in audio_segments)
-    fade_start   = max(0, total_dur - 3)
     res_w, res_h = resolution.split("x")
-    n            = len(image_paths)
+    n           = len(plate_paths)
+    total_dur   = sum(s["duration_sec"] for s in audio_segments)
+    fade_start  = max(0, total_dur - 3)
 
-    # Ken Burns scale: 12% larger than target to allow drift (only used without per_slide_durations)
-    kb_w    = int(int(res_w) * 1.12)
-    kb_h    = int(int(res_h) * 1.12)
-    extra_x = (kb_w - int(res_w)) // 2
-    extra_y = (kb_h - int(res_h)) // 2
-
-    # Character is baked into slides when per_slide_durations is provided
-    has_char = bool(character_path and Path(character_path).exists() and per_slide_durations is None)
+    # Per-slide durations (or uniform fallback)
+    slide_durs = per_slide_durations if per_slide_durations else [display_dur] * n
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    # ── Step 1: Merge narration ───────────────────────────────────
+    # ── Step 1: Merge narration ───────────────────────────────────────────────
     merged_audio = os.path.join(os.path.dirname(output_path), "narration.wav")
     compose_audio([s["audio_path"] for s in audio_segments], merged_audio, ffmpeg)
 
-    # ── Step 2: Copy font ─────────────────────────────────────────
+    # ── Step 2: Copy font ─────────────────────────────────────────────────────
     work_dir   = os.path.dirname(output_path)
     font_src   = config["thumbnail"]["font_path"]
     local_font = os.path.join(work_dir, "fonts", os.path.basename(font_src))
@@ -94,143 +91,126 @@ def render_video(
     if not os.path.exists(local_font):
         shutil.copy2(font_src, local_font)
 
-    # ── Step 3: Ensure SE exists ──────────────────────────────────
+    # ── Step 3: Ensure SE exists ──────────────────────────────────────────────
     if se_path and not Path(se_path).exists():
         _ensure_se(ffmpeg, se_path)
-
     has_se = bool(se_path and Path(se_path).exists())
 
-    # ── Step 4: Build FFmpeg inputs ───────────────────────────────
-    inputs = []
-    if per_slide_durations:
-        for i, (img, dur) in enumerate(zip(image_paths, per_slide_durations)):
-            clip_dur = dur + (fade_dur if i < n - 1 else 0)
-            inputs += ["-loop", "1", "-t", str(clip_dur), "-i", img]
-    else:
-        for img in image_paths:
-            inputs += ["-loop", "1", "-t", str(display_dur), "-i", img]
+    # ── Step 4: Build FFmpeg inputs ───────────────────────────────────────────
+    # Group 1: plate images (n inputs, indices 0..n-1)
+    # Group 2: non-None content images (m inputs, indices n..n+m-1)
+    # Group 3: audio, bgm, SE
 
-    audio_idx = n
+    content_indices = {}   # slide_i → ffmpeg_input_index for its content image
+    inputs = []
+
+    for i in range(n):
+        clip_dur = slide_durs[i] + (fade_dur if i < n - 1 else 0)
+        inputs += ["-loop", "1", "-t", f"{clip_dur:.3f}", "-i", plate_paths[i]]
+
+    content_ffmpeg_start = n
+    j = 0
+    for i in range(n):
+        if content_paths[i] is not None:
+            clip_dur = slide_durs[i] + (fade_dur if i < n - 1 else 0)
+            inputs += ["-loop", "1", "-t", f"{clip_dur:.3f}", "-i", content_paths[i]]
+            content_indices[i] = content_ffmpeg_start + j
+            j += 1
+    m = j
+
+    audio_idx = n + m
     inputs += ["-i", merged_audio]
-    bgm_idx = n + 1
+    bgm_idx = n + m + 1
     inputs += ["-i", bgm_path]
 
-    next_idx = n + 2
     se_idx = None
     if has_se:
-        se_idx = next_idx
+        se_idx = n + m + 2
         inputs += ["-i", se_path]
-        next_idx += 1
 
+    # Character overlay: permanent static PNG (overlaid last, never transitions)
     char_idx = None
-    if has_char:
-        char_idx = next_idx
-        inputs += ["-loop", "1", "-t", str(total_dur + 1), "-i", character_path]
+    if character_path:
+        char_idx = n + m + 2 + (1 if has_se else 0)
+        inputs += ["-loop", "1", "-t", f"{total_dur:.3f}", "-i", character_path]
 
-    # ── Step 5: Build filter_complex ─────────────────────────────
-    # Transition playlist: varied professional effects
+    # ── Step 5: Build filter_complex ─────────────────────────────────────────
+    # Only fade-family transitions for background — content/text animate independently
     _TRANSITIONS = [
-        "fade", "wipeleft", "wiperight", "slideleft", "slideright",
-        "circleopen", "circleclose", "dissolve", "fadeblack",
-        "smoothleft", "smoothright", "smoothup", "smoothdown",
-        "diagtl", "diagbr", "radial", "pixelize",
-        "horzopen", "horzclose", "vertopen", "vertclose",
+        "fade", "dissolve", "fadeblack", "pixelize",
+        "fade", "dissolve", "fadeblack",
+        "circleopen", "circleclose", "radial",
+        "fade", "dissolve",
     ]
 
     parts = []
 
-    # Ken Burns patterns: (scale, x_dir, y_dir)
-    # x_dir: 'r'=right→left, 'l'=left→right, 'c'=center
-    # y_dir: 'd'=down→up,    'u'=up→down,    'c'=center
-    _KB_PATTERNS = [
-        (1.06, 'r', 'c'),   # zoom+pan right
-        (1.05, 'l', 'c'),   # zoom+pan left
-        (1.07, 'c', 'd'),   # zoom+pan down→up
-        (1.04, 'r', 'd'),   # zoom+diagonal
-        (1.06, 'l', 'u'),   # zoom+diagonal reverse
-        (1.05, 'c', 'u'),   # zoom+pan up→down
-        (1.08, 'r', 'u'),   # strong zoom+diagonal
-        (1.04, 'l', 'd'),   # gentle zoom+diagonal
-    ]
-
+    # Static scale for each plate
     for i in range(n):
-        if per_slide_durations:
-            dur_i    = per_slide_durations[i]
-            KB, xd, yd = _KB_PATTERNS[i % len(_KB_PATTERNS)]
-            kb_i_w   = int(int(res_w) * KB / 2) * 2
-            kb_i_h   = int(int(res_h) * KB / 2) * 2
-            ox       = (kb_i_w - int(res_w)) // 2
-            oy       = (kb_i_h - int(res_h)) // 2
-            safe_dur = max(dur_i, 0.1)
-            t_norm   = f"min(t,{safe_dur:.2f})/{safe_dur:.2f}"
+        parts.append(
+            f"[{i}:v]"
+            f"scale={res_w}:{res_h}:force_original_aspect_ratio=increase,"
+            f"crop={res_w}:{res_h},"
+            f"fps={fps},setsar=1"
+            f"[plate_{i}]"
+        )
 
-            x_expr = (
-                f"'{ox}*(1-{t_norm})'" if xd == 'r' else
-                f"'{ox}*{t_norm}'"     if xd == 'l' else
-                f"'{ox}'"
-            )
-            y_expr = (
-                f"'{oy}*(1-{t_norm})'" if yd == 'd' else
-                f"'{oy}*{t_norm}'"     if yd == 'u' else
-                f"'{oy}'"
-            )
+    # Zoompan animation for each content image
+    for i, ci in content_indices.items():
+        clip_dur = slide_durs[i] + (fade_dur if i < n - 1 else 0)
+        D        = max(1, int(clip_dur * fps))
+        zoom_rate = 0.04 / D
+        parts.append(
+            f"[{ci}:v]"
+            f"scale={CONTENT_W}:{CONTENT_H}:force_original_aspect_ratio=increase,"
+            f"crop={CONTENT_W}:{CONTENT_H},"
+            f"fps={fps},"
+            f"zoompan="
+            f"z='min(zoom+{zoom_rate:.6f},1.04)':"
+            f"x='(iw-iw/zoom)/2':"
+            f"y='(ih-ih/zoom)/2':"
+            f"d={D}:s={CONTENT_W}x{CONTENT_H}:fps={fps},"
+            f"setsar=1"
+            f"[anim_{i}]"
+        )
+
+    # Compose: overlay content onto plate (or use plate directly for intro)
+    for i in range(n):
+        if i in content_indices:
             parts.append(
-                f"[{i}:v]"
-                f"scale={kb_i_w}:{kb_i_h}:force_original_aspect_ratio=increase,"
-                f"crop={kb_i_w}:{kb_i_h},"
-                f"fps={fps},"
-                f"crop={res_w}:{res_h}:x={x_expr}:y={y_expr},"
-                f"setsar=1"
-                f"[v{i}]"
+                f"[plate_{i}][anim_{i}]"
+                f"overlay=x={CONTENT_X1}:y={CONTENT_Y1}:shortest=1"
+                f"[comp_{i}]"
             )
         else:
-            # Ken Burns: alternate drift direction
-            crop_x = (
-                f"min({extra_x}*t/{display_dur},{extra_x * 2})"
-                if i % 2 == 0
-                else f"max({extra_x}*(1-t/{display_dur}),0)"
-            )
-            parts.append(
-                f"[{i}:v]"
-                f"scale={kb_w}:{kb_h}:force_original_aspect_ratio=increase,"
-                f"crop={kb_w}:{kb_h},"
-                f"fps={fps},"
-                f"crop={res_w}:{res_h}:x='{crop_x}':y='{extra_y}',"
-                f"setsar=1"
-                f"[v{i}]"
-            )
+            parts.append(f"[plate_{i}]null[comp_{i}]")
 
-    # Cross-fade chain between images (xfade with varied transitions)
+    # xfade chain between composed frames
     if n == 1:
-        parts.append(f"[v0]trim=duration={total_dur:.3f},setpts=PTS-STARTPTS[trimmed]")
+        parts.append(f"[comp_0]trim=duration={total_dur:.3f},setpts=PTS-STARTPTS[pre_char]")
     else:
-        prev = "v0"
+        prev = "comp_0"
+        cumulative = 0.0
         for i in range(n - 1):
-            nxt = f"v{i + 1}"
-            out = f"xf{i + 1}" if i < n - 2 else "slideshow"
-            if per_slide_durations:
-                offset = sum(per_slide_durations[:i + 1]) - fade_dur
-            else:
-                offset = (i + 1) * (display_dur - fade_dur)
-            trans = _TRANSITIONS[i % len(_TRANSITIONS)]
+            nxt    = f"comp_{i + 1}"
+            out    = f"xf_{i + 1}" if i < n - 2 else "slideshow"
+            cumulative += slide_durs[i]
+            offset = max(cumulative - fade_dur, 0.0)
+            trans  = _TRANSITIONS[i % len(_TRANSITIONS)]
             parts.append(
-                f"[{prev}][{nxt}]xfade=transition={trans}:duration={fade_dur}:offset={offset:.3f}[{out}]"
+                f"[{prev}][{nxt}]xfade=transition={trans}:duration={fade_dur:.3f}:offset={offset:.3f}[{out}]"
             )
             prev = out
-        parts.append(f"[slideshow]trim=duration={total_dur:.3f},setpts=PTS-STARTPTS[trimmed]")
+        parts.append(f"[slideshow]trim=duration={total_dur:.3f},setpts=PTS-STARTPTS[pre_char]")
 
-    # Optional character overlay with bobbing animation
-    video_out_label = "trimmed"
-    if has_char:
-        parts.append(f"[{char_idx}:v]scale=-1:{char_h}[char_scaled]")
-        parts.append(
-            f"[trimmed][char_scaled]"
-            f"overlay=x=W-w-30:y='H-h-20-8*sin(t*2.513)':eval=frame"
-            f"[video_out]"
-        )
-        video_out_label = "video_out"
+    # Character overlay: composited on top of slideshow, never transitions
+    if char_idx is not None:
+        parts.append(f"[{char_idx}:v]setsar=1[char_layer]")
+        parts.append(f"[pre_char][char_layer]overlay=0:0:shortest=1[trimmed]")
+    else:
+        parts.append(f"[pre_char]null[trimmed]")
 
-    # BGM: loop → trim → volume → fade in/out
+    # BGM
     parts.append(
         f"[{bgm_idx}:a]aloop=loop=-1:size=2e9,"
         f"atrim=duration={total_dur:.3f},"
@@ -239,7 +219,7 @@ def render_video(
         f"afade=t=out:st={fade_start:.3f}:d=3[bgm_out]"
     )
 
-    # SE + final audio mix (normalize=0 to keep individual volumes as-is)
+    # Audio mix
     if has_se:
         parts.append(f"[{se_idx}:a]volume={se_vol}[se_out]")
         parts.append(
@@ -254,14 +234,14 @@ def render_video(
 
     filter_complex = ";".join(parts)
 
-    # ── Step 6: Pass 1 — images + audio + character ───────────────
+    # ── Step 6: Pass 1 — compose video + audio ────────────────────────────────
     raw_video = output_path.replace(".mp4", "_raw.mp4")
     cmd_pass1 = (
         [ffmpeg, "-y"]
         + inputs
         + [
             "-filter_complex", filter_complex,
-            "-map", f"[{video_out_label}]",
+            "-map", "[trimmed]",
             "-map", "[audio_out]",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "aac", "-b:a", "192k",
@@ -271,18 +251,17 @@ def render_video(
     )
     _run(cmd_pass1, "Video render pass1")
 
-    # ── Step 7: Pass 2 — subtitle burn + bottom accent line ───────
+    # ── Step 7: Pass 2 — subtitle burn + bottom accent line ───────────────────
     sub_dir  = os.path.dirname(subtitle_path)
     sub_font = os.path.join(sub_dir, "fonts", os.path.basename(font_src))
     os.makedirs(os.path.dirname(sub_font), exist_ok=True)
     if not os.path.exists(sub_font):
         shutil.copy2(font_src, sub_font)
 
-    # Bottom accent line — color from active channel (default green)
-    ch_accent = config.get("active_channel", {}).get("accent_color", [50, 200, 80])
+    ch_accent  = config.get("active_channel", {}).get("accent_color", [50, 200, 80])
     accent_hex = "{:02X}{:02X}{:02X}".format(*ch_accent[:3])
-    vf_pass2 = f"drawbox=x=0:y=ih-6:w=iw:h=6:color=0x{accent_hex}:t=fill,ass=subs.ass:fontsdir=fonts"
-    cmd_pass2 = [
+    vf_pass2   = f"drawbox=x=0:y=ih-6:w=iw:h=6:color=0x{accent_hex}:t=fill,ass=subs.ass:fontsdir=fonts"
+    cmd_pass2  = [
         ffmpeg, "-y", "-i", raw_video,
         "-vf", vf_pass2,
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
