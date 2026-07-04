@@ -101,10 +101,10 @@ SCRIPT_PROMPT = """\
   "image_search_keywords": ["英語キーワード1", "英語キーワード2", "英語キーワード3", "英語キーワード4", "英語キーワード5"]
 }}
 
-## ★ 厳守：動画5〜10分 ★ セグメントは最低18個、各150〜200文字
-- セグメント数: **最低18段落、目安20段落**
+## ★ 厳守：動画5〜7分 ★ セグメントは最低12個、各150〜200文字
+- セグメント数: **最低12段落、目安14〜16段落**
 - 各 `text`: **4〜6文、150〜200文字**（短いと動画が1分未満になる。150文字未満は絶対NG）
-- 合計3000文字以上のナレーションが必要
+- 合計2000文字以上のナレーションが必要
 
 ## 映像レイアウト（4レイヤー独立）
 キャラ（固定）/ 記事画像（中央アニメ）/ テキスト（字幕アニメ）/ 背景 は独立して動く。
@@ -115,11 +115,11 @@ SCRIPT_PROMPT = """\
 - 具体的な数字・比較・意外な切り口を必ず含める
 - 「あなたの生活にも影響する」視点を1箇所入れる
 
-## 推奨構成（20段落目安）
-つかみ(1)→概要(2)→背景・歴史(3)→詳細A(3)→詳細B(3)→データ(2)→影響(2)→見解(2)→展望(2)→まとめCTA(2)
+## 推奨構成（14〜16段落目安）
+つかみ(1)→概要(2)→背景・歴史(2)→詳細A(2)→詳細B(2)→データ(2)→影響(2)→見解(1)→展望(1)→まとめCTA(1)
 
 ## script_segments の規則
-- 最低18段落（目安20段落）。各textは4〜6文・150〜200文字
+- 最低12段落（目安14〜16段落）。各textは4〜6文・150〜200文字
 - 横動画は Shorts より深く掘り下げること
 - tags は12〜15個（「{channel_name}」「ずんだもん」「VOICEVOX」を含める）
 
@@ -263,7 +263,7 @@ class ClaudeScriptWriter:
         logger.info(f"Deep-dive extracted theme: {extracted_theme}")
         return self.generate(item, channel=channel)
 
-    def _validate(self, data: dict, min_segments: int = 18):
+    def _validate(self, data: dict, min_segments: int = 12):
         required = ["title", "description", "tags", "script_segments", "thumbnail_title", "image_search_keywords"]
         for key in required:
             if key not in data:
@@ -273,10 +273,10 @@ class ClaudeScriptWriter:
             raise ValueError("script_segments is empty")
         if len(segments) < min_segments:
             raise ValueError(
-                f"Too few script_segments: {len(segments)} (minimum {min_segments} required for 5-10 min video)"
+                f"Too few script_segments: {len(segments)} (minimum {min_segments} required for 5-7 min video)"
             )
-        if len(segments) < 20:
-            logger.warning(f"script_segments below target: {len(segments)} (target 20-22 for 5-10 min video)")
+        if len(segments) < 14:
+            logger.warning(f"script_segments below target: {len(segments)} (target 14-16 for 5-7 min video)")
         # Each segment must be a paragraph (150+ chars) — short segments make < 2 min videos
         texts = [seg.get("text", "") for seg in segments]
         total_chars = sum(len(t) for t in texts)

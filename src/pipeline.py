@@ -439,7 +439,8 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
                 script_data = writer.generate(item, channel=channel)
                 break
             except Exception as e:
-                logger.warning(f"Script generation failed for '{item['title']}': {e}")
+                cause = e.last_attempt.exception() if hasattr(e, "last_attempt") else e
+                logger.warning(f"Script generation failed for '{item['title']}': {cause!r}")
                 next_item = fetch_and_select_item(config, dedup, channel=channel)
                 if not next_item:
                     raise RuntimeError("No more items available after script failures") from e
