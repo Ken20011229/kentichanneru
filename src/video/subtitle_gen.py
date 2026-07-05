@@ -4,7 +4,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_MAX_LINE_CHARS = 22
+_MAX_LINE_CHARS = 20
+_MAX_LINES_PER_CUE = 2
 
 
 def _ass_color(r: int, g: int, b: int, alpha: int = 0x00) -> str:
@@ -68,6 +69,16 @@ def _split_lines(text: str, max_chars: int = _MAX_LINE_CHARS) -> list[str]:
     return lines
 
 
+def _split_into_cues(text: str, max_chars: int = _MAX_LINE_CHARS,
+                     max_lines: int = _MAX_LINES_PER_CUE) -> list[list[str]]:
+    """Break narration text into cue groups of at most max_lines lines,
+    each line at most max_chars. A long segment becomes several cues that
+    must be timed sequentially (proportional to their character count) so
+    the on-screen text keeps pace with the voice."""
+    all_lines = _split_lines(text, max_chars)
+    return [all_lines[i:i + max_lines] for i in range(0, len(all_lines), max_lines)] or [[""]]
+
+
 def _escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{")
 
@@ -116,12 +127,18 @@ _DEFAULT_ANIM: dict[str, str] = {
 }
 
 
-def _format_event(start: str, end: str, text: str,
-                  visual_type: str, is_first: bool,
-                  animation_style: str = None) -> str:
-    """Build one ASS Dialogue line with per-type style and animation."""
-    lines = _split_lines(text)
-    body  = "\\N".join(_escape(ln) for ln in lines)
+def _format_events(seg_start: float, seg_dur: float, text: str,
+                   visual_type: str, is_first: bool,
+                   animation_style: str = None) -> list[str]:
+    """Build one or more ASS Dialogue lines for a segment.
+
+    Long narration is split into multiple cues (max _MAX_LINES_PER_CUE lines
+    of _MAX_LINE_CHARS chars each). Each cue's on-screen duration is
+    proportional to its character count within the segment, so the text
+    keeps pace with the voice instead of dumping the whole narration at once.
+    """
+    cue_groups  = _split_into_cues(text)
+    total_chars = sum(len(ln) for grp in cue_groups for ln in grp) or 1
 
     # Style selection
     if is_first:
@@ -138,7 +155,18 @@ def _format_event(start: str, end: str, text: str,
                else _DEFAULT_ANIM.get("intro" if is_first else visual_type, "fade")
     tags = _ANIM_TAGS[anim_key]
 
-    return f"Dialogue: 0,{start},{end},{style},,0,0,0,,{tags}{body}"
+    events = []
+    cursor  = seg_start
+    seg_end = seg_start + seg_dur
+    for grp in cue_groups:
+        grp_chars = sum(len(ln) for ln in grp) or 1
+        cue_end   = min(cursor + seg_dur * (grp_chars / total_chars), seg_end)
+        body      = "\\N".join(_escape(ln) for ln in grp)
+        events.append(
+            f"Dialogue: 0,{_to_ass_time(cursor)},{_to_ass_time(cue_end)},{style},,0,0,0,,{tags}{body}"
+        )
+        cursor = cue_end
+    return events
 
 
 def generate_ass(segments: list[dict], output_path: str, channel: dict = None) -> str:
@@ -157,10 +185,8 @@ def generate_ass(segments: list[dict], output_path: str, channel: dict = None) -
 
     cursor = 0.0
     for i, seg in enumerate(segments):
-        start = _to_ass_time(cursor)
-        end   = _to_ass_time(cursor + seg["duration_sec"])
-        lines.append(_format_event(
-            start, end,
+        lines.extend(_format_events(
+            cursor, seg["duration_sec"],
             seg["text"],
             seg.get("visual_type", "detail"),
             is_first=(i == 0),
@@ -217,22 +243,29 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for i, seg in enumerate(segments):
         if cursor >= max_dur:
             break
-        end_t  = min(cursor + seg["duration_sec"], max_dur)
-        start  = _to_ass_time(cursor)
-        end    = _to_ass_time(end_t)
-        body   = "\\N".join(
-            _escape(ln) for ln in _split_lines(seg["text"], max_chars=16)
-        )
-        style = "Hook" if i < 2 else "Main"
+        seg_end = min(cursor + seg["duration_sec"], max_dur)
+        seg_dur = seg_end - cursor
+        style   = "Hook" if i < 2 else "Main"
 
         # Use LLM-specified animation if available, else cycle through pool
         anim_key = seg.get("animation_style")
-        if anim_key and anim_key in _ANIM_TAGS:
-            tags = _ANIM_TAGS[anim_key]
-        else:
-            tags = _SHORTS_ANIMS[i % len(_SHORTS_ANIMS)]
+        tags = _ANIM_TAGS[anim_key] if (anim_key and anim_key in _ANIM_TAGS) \
+               else _SHORTS_ANIMS[i % len(_SHORTS_ANIMS)]
 
-        event_lines.append(f"Dialogue: 0,{start},{end},{style},,0,0,0,,{tags}{body}")
+        # Split long narration into cues (max 2 lines x 16 chars) timed
+        # proportionally to character count so text keeps pace with the voice.
+        cue_groups  = _split_into_cues(seg["text"], max_chars=16, max_lines=2)
+        total_chars = sum(len(ln) for grp in cue_groups for ln in grp) or 1
+        sub_cursor  = cursor
+        for grp in cue_groups:
+            grp_chars = sum(len(ln) for ln in grp) or 1
+            cue_end   = min(sub_cursor + seg_dur * (grp_chars / total_chars), seg_end)
+            body      = "\\N".join(_escape(ln) for ln in grp)
+            event_lines.append(
+                f"Dialogue: 0,{_to_ass_time(sub_cursor)},{_to_ass_time(cue_end)},{style},,0,0,0,,{tags}{body}"
+            )
+            sub_cursor = cue_end
+
         cursor += seg["duration_sec"]
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)

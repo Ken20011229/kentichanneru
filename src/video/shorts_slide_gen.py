@@ -254,7 +254,7 @@ def _content_keyword(fp, keyword, accent, sec_num, sec_label) -> Image.Image:
     # Keyword centered
     avail_w = CONTENT_W - 60
     avail_h = CONTENT_H - 100
-    for size in (140, 114, 92, 76, 62, 50):
+    for size in (100, 86, 72, 60, 50):
         fk  = _font(fp, size)
         ls  = _wrap_px(draw, keyword, fk, avail_w)
         lh  = max((_th(draw, ln, fk) for ln in ls), default=size) + 18
@@ -270,11 +270,12 @@ def _content_keyword(fp, keyword, accent, sec_num, sec_label) -> Image.Image:
     ty       = (CONTENT_H - total_kh) // 2
 
     for ln in kw_lines:
+        lx = 30 + max(0, (avail_w - _tw(draw, ln, font_kw)) // 2)
         g_layer = Image.new("RGBA", (CONTENT_W, CONTENT_H), (0, 0, 0, 0))
-        ImageDraw.Draw(g_layer).text((30, ty), ln, font=font_kw, fill=(*accent, 150))
+        ImageDraw.Draw(g_layer).text((lx, ty), ln, font=font_kw, fill=(*accent, 150))
         img  = Image.alpha_composite(img, g_layer.filter(ImageFilter.GaussianBlur(16)))
         draw = ImageDraw.Draw(img)
-        draw.text((30, ty), ln, font=font_kw, fill=_COLOR_WHITE,
+        draw.text((lx, ty), ln, font=font_kw, fill=_COLOR_WHITE,
                   stroke_width=2, stroke_fill=(0, 0, 0, 80))
         ty += kw_lh
 

@@ -90,7 +90,20 @@ jobs:
           REDDIT_CLIENT_SECRET: PLACEHOLDER
           TTS_PROVIDER: voicevox
           FFMPEG_PATH: ffmpeg
-        run: python main.py --once
+        run: |
+          # ランナーが謎の強制終了をするケースの原因調査用に、メモリ/ディスク使用量を
+          # 15秒おきにライブログへ流す（強制終了直前の状態を後から確認できるようにする）
+          ( while true; do
+              echo "[monitor] $(date -u +%H:%M:%S) $(free -m | awk '/^Mem:/{print "mem="$3"MB/"$2"MB"}') disk_avail=$(df -h --output=avail / | tail -1 | tr -d ' ')"
+              sleep 15
+            done ) &
+          MONITOR_PID=$!
+          set +e
+          python main.py --once
+          EXIT_CODE=$?
+          set -e
+          kill "$MONITOR_PID" 2>/dev/null || true
+          exit $EXIT_CODE
 
       # google-auth がアクセストークンを更新した場合に Secret を上書き
       - name: Refresh YouTube token secret

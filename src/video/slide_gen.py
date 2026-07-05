@@ -247,16 +247,24 @@ def _plate_intro(fp, title, accent, badge_label, bg_image_path=None) -> Image.Im
 
     inner_w = CONTENT_X2 - CONTENT_X1 - 80
     text_x  = CONTENT_X1 + 44
-    for size in (92, 76, 64, 54, 44):
-        ft    = _font(fp, size)
-        lines = _wrap_px(draw, title, ft, inner_w)
-        lh    = max((_th(draw, ln, ft) for ln in lines), default=size) + 22
-        if lh * len(lines) < int(H * 0.50) and len(lines) <= 4:
-            font_title = ft
+    MAX_TITLE_LINES = 2
+
+    font_title, lines = None, None
+    for size in (92, 76, 64, 54, 44, 38, 32):
+        ft         = _font(fp, size)
+        full_lines = _wrap_px(draw, title, ft, inner_w)
+        if len(full_lines) <= MAX_TITLE_LINES:
+            font_title, lines = ft, full_lines
             break
-    else:
-        font_title = _font(fp, 44)
-        lines = _wrap_px(draw, title, font_title, inner_w)
+
+    if font_title is None:
+        # Doesn't fit in 2 lines even at the smallest size — truncate with ellipsis.
+        font_title = _font(fp, 32)
+        lines = _wrap_px(draw, title, font_title, inner_w)[:MAX_TITLE_LINES]
+        last = lines[-1]
+        while last and _tw(draw, last + "…", font_title) > inner_w:
+            last = last[:-1]
+        lines[-1] = last + "…"
 
     lh    = max((_th(draw, ln, font_title) for ln in lines), default=44) + 22
     total = lh * len(lines)
@@ -338,7 +346,7 @@ def _content_keyword(fp, keyword, accent, section_num, sec_label) -> Image.Image
         avail_h  = CONTENT_H - start_y - 56
         avail_w  = CONTENT_W - 72
 
-        for size in (170, 140, 114, 92, 76, 60, 48):
+        for size in (112, 96, 80, 66, 54, 48):
             fk   = _font(fp, size)
             ls   = _wrap_px(draw, keyword, fk, avail_w)
             lh   = max((_th(draw, ln, fk) for ln in ls), default=size) + 22
@@ -354,11 +362,12 @@ def _content_keyword(fp, keyword, accent, section_num, sec_label) -> Image.Image
         ty       = start_y + max(0, (avail_h - total_kh) // 2)
 
         for ln in kw_lines:
+            lx = 36 + max(0, (avail_w - _tw(draw, ln, font_kw)) // 2)
             g_layer = Image.new("RGBA", (CONTENT_W, CONTENT_H), (0, 0, 0, 0))
-            ImageDraw.Draw(g_layer).text((36, ty), ln, font=font_kw, fill=(*accent, 150))
+            ImageDraw.Draw(g_layer).text((lx, ty), ln, font=font_kw, fill=(*accent, 150))
             img  = Image.alpha_composite(img, g_layer.filter(ImageFilter.GaussianBlur(18)))
             draw = ImageDraw.Draw(img)
-            draw.text((36, ty), ln, font=font_kw, fill=_COLOR_WHITE,
+            draw.text((lx, ty), ln, font=font_kw, fill=_COLOR_WHITE,
                       stroke_width=2, stroke_fill=(0, 0, 0, 80))
             ty += kw_lh
 

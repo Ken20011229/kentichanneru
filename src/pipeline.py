@@ -434,7 +434,7 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
         # Stage 3: Generate script and metadata
         writer = ClaudeScriptWriter(config["groq"])
         script_data = None
-        for _item_attempt in range(3):
+        for _item_attempt in range(6):
             try:
                 script_data = writer.generate(item, channel=channel)
                 break
