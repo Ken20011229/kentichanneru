@@ -1,9 +1,11 @@
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 from src.video.shorts_slide_gen import CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H
+from src.video.slide_render import render_slide_clip, merge_clips_sequential
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,6 @@ def render_shorts(
     work_dir = os.path.dirname(output_path)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    import shutil
     local_font = os.path.join(work_dir, "fonts", os.path.basename(font_src))
     os.makedirs(os.path.dirname(local_font), exist_ok=True)
     if not os.path.exists(local_font):
@@ -66,104 +67,51 @@ def render_shorts(
         "vertopen", "vertclose", "slideleft",
     ]
 
-    # ── Build inputs ──────────────────────────────────────────────────────────
-    # Group 1: plate images (indices 0..n-1)
-    # Group 2: non-None content images (indices n..n+m-1)
-    # Group 3: audio, bgm
+    # ── Render each slide as an individual clip (input count <= 2) ────────────
+    # 全スライドで統一して「表示時間 + 次のxfade用の予備fade_dur」の長さを
+    # 持たせる(composer.pyと同じ不変量)。
+    clips_dir = os.path.join(work_dir, "clips")
+    os.makedirs(clips_dir, exist_ok=True)
 
-    content_indices: dict[int, int] = {}
-    inputs = []
-
+    clip_paths = []
     for i in range(n):
-        clip_dur = slide_durs[i] + (fade_dur if i < n - 1 else 0)
-        inputs += ["-loop", "1", "-t", f"{clip_dur:.3f}", "-i", plate_paths[i]]
-
-    content_start = n
-    j = 0
-    for i in range(n):
-        if i < len(content_paths) and content_paths[i] is not None:
-            clip_dur = slide_durs[i] + (fade_dur if i < n - 1 else 0)
-            inputs += ["-loop", "1", "-t", f"{clip_dur:.3f}", "-i", content_paths[i]]
-            content_indices[i] = content_start + j
-            j += 1
-    m = j
-
-    audio_idx = n + m
-    inputs += ["-t", str(max_duration), "-i", audio_path]
-    bgm_idx = n + m + 1
-    inputs += ["-i", bgm_path]
-
-    # ── filter_complex ────────────────────────────────────────────────────────
-    parts = []
-
-    # Static scale for each plate (no Ken Burns)
-    for i in range(n):
-        parts.append(
-            f"[{i}:v]"
-            f"scale={VW}:{VH}:force_original_aspect_ratio=increase,"
-            f"crop={VW}:{VH},"
-            f"fps={fps},setsar=1"
-            f"[plate_{i}]"
+        clip_dur = slide_durs[i] + fade_dur
+        content_path = content_paths[i] if i < len(content_paths) else None
+        clip_out = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
+        render_slide_clip(
+            ffmpeg, plate_paths[i], content_path, clip_dur, fps,
+            VW, VH, CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H,
+            clip_out,
         )
+        clip_paths.append(clip_out)
 
-    # Zoompan animation for content images
-    for i, ci in content_indices.items():
-        clip_dur  = slide_durs[i] + (fade_dur if i < n - 1 else 0)
-        D         = max(1, int(clip_dur * fps))
-        zoom_rate = 0.04 / D
-        parts.append(
-            f"[{ci}:v]"
-            f"scale={CONTENT_W}:{CONTENT_H}:force_original_aspect_ratio=increase,"
-            f"crop={CONTENT_W}:{CONTENT_H},"
-            f"fps={fps},"
-            f"zoompan="
-            f"z='min(zoom+{zoom_rate:.6f},1.04)':"
-            f"x='(iw-iw/zoom)/2':"
-            f"y='(ih-ih/zoom)/2':"
-            f"d={D}:s={CONTENT_W}x{CONTENT_H}:fps={fps},"
-            f"setsar=1"
-            f"[anim_{i}]"
-        )
-
-    # Compose: overlay content onto plate
-    for i in range(n):
-        if i in content_indices:
-            parts.append(
-                f"[plate_{i}][anim_{i}]"
-                f"overlay=x={CONTENT_X1}:y={CONTENT_Y1}:shortest=1"
-                f"[comp_{i}]"
-            )
-        else:
-            parts.append(f"[plate_{i}]null[comp_{i}]")
-
-    # xfade chain
+    # ── Merge clips via sequential xfade (input count always 2) ───────────────
     if n == 1:
-        parts.append(f"[comp_0]trim=duration={max_duration:.3f},setpts=PTS-STARTPTS[trimmed_v]")
+        slideshow_path = clip_paths[0]
     else:
-        cumulative = 0.0
-        prev = "comp_0"
-        for i in range(n - 1):
-            nxt        = f"comp_{i + 1}"
-            out        = f"xf_{i + 1}" if i < n - 2 else "slideshow"
-            cumulative += slide_durs[i]
-            offset     = max(cumulative - fade_dur, 0.0)
-            trans      = _SHORTS_TRANSITIONS[i % len(_SHORTS_TRANSITIONS)]
-            parts.append(
-                f"[{prev}][{nxt}]xfade=transition={trans}:duration={fade_dur:.3f}:offset={offset:.3f}[{out}]"
-            )
-            prev = out
-        parts.append(f"[slideshow]trim=duration={max_duration:.3f},setpts=PTS-STARTPTS[trimmed_v]")
+        slideshow_path, _ = merge_clips_sequential(
+            ffmpeg, clip_paths, slide_durs, fade_dur, _SHORTS_TRANSITIONS, clips_dir,
+        )
 
-    # BGM
+    # ── Final composite — narration + bgm mix ──────────────────────────────────
+    # character overlayは既にplateに焼き込み済みのため、videoの合成は
+    # trimのみ。入力は video 1本 + narration + bgm の3本のみでn非依存。
+    inputs = [
+        "-i", slideshow_path,
+        "-t", str(max_duration), "-i", audio_path,
+        "-i", bgm_path,
+    ]
+    parts = [f"[0:v]trim=duration={max_duration:.3f},setpts=PTS-STARTPTS[trimmed_v]"]
+
     parts.append(
-        f"[{bgm_idx}:a]aloop=loop=-1:size=2e9,"
+        f"[2:a]aloop=loop=-1:size=2e9,"
         f"atrim=duration={max_duration:.3f},"
         f"volume={bgm_vol},"
         f"afade=t=in:st=0:d=1,"
         f"afade=t=out:st={max_duration - 2:.3f}:d=2[bgm_out]"
     )
     parts.append(
-        f"[{audio_idx}:a][bgm_out]"
+        f"[1:a][bgm_out]"
         f"amix=inputs=2:duration=first:dropout_transition=1:normalize=0[audio_out]"
     )
 
@@ -184,6 +132,7 @@ def render_shorts(
         ]
     )
     _run(cmd_pass1, "Shorts pass1")
+    shutil.rmtree(clips_dir, ignore_errors=True)
 
     # Pass2: subtitles
     sub_dir   = os.path.dirname(subtitle_path)

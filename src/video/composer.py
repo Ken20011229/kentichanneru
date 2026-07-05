@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from src.video.slide_gen import CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H
+from src.video.slide_render import render_slide_clip, merge_clips_sequential
 
 logger = logging.getLogger(__name__)
 
@@ -96,45 +97,24 @@ def render_video(
         _ensure_se(ffmpeg, se_path)
     has_se = bool(se_path and Path(se_path).exists())
 
-    # ── Step 4: Build FFmpeg inputs ───────────────────────────────────────────
-    # Group 1: plate images (n inputs, indices 0..n-1)
-    # Group 2: non-None content images (m inputs, indices n..n+m-1)
-    # Group 3: audio, bgm, SE
+    # ── Step 4: Render each slide as an individual clip (input count <= 2) ────
+    # 全スライドで統一して「表示時間 + 次のxfade用の予備fade_dur」の長さを
+    # 持たせる(最後のスライドも例外にしない)。
+    clips_dir = os.path.join(work_dir, "clips")
+    os.makedirs(clips_dir, exist_ok=True)
 
-    content_indices = {}   # slide_i → ffmpeg_input_index for its content image
-    inputs = []
-
+    clip_paths = []
     for i in range(n):
-        clip_dur = slide_durs[i] + (fade_dur if i < n - 1 else 0)
-        inputs += ["-loop", "1", "-t", f"{clip_dur:.3f}", "-i", plate_paths[i]]
+        clip_dur = slide_durs[i] + fade_dur
+        clip_out = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
+        render_slide_clip(
+            ffmpeg, plate_paths[i], content_paths[i], clip_dur, fps,
+            int(res_w), int(res_h), CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H,
+            clip_out,
+        )
+        clip_paths.append(clip_out)
 
-    content_ffmpeg_start = n
-    j = 0
-    for i in range(n):
-        if content_paths[i] is not None:
-            clip_dur = slide_durs[i] + (fade_dur if i < n - 1 else 0)
-            inputs += ["-loop", "1", "-t", f"{clip_dur:.3f}", "-i", content_paths[i]]
-            content_indices[i] = content_ffmpeg_start + j
-            j += 1
-    m = j
-
-    audio_idx = n + m
-    inputs += ["-i", merged_audio]
-    bgm_idx = n + m + 1
-    inputs += ["-i", bgm_path]
-
-    se_idx = None
-    if has_se:
-        se_idx = n + m + 2
-        inputs += ["-i", se_path]
-
-    # Character overlay: permanent static PNG (overlaid last, never transitions)
-    char_idx = None
-    if character_path:
-        char_idx = n + m + 2 + (1 if has_se else 0)
-        inputs += ["-loop", "1", "-t", f"{total_dur:.3f}", "-i", character_path]
-
-    # ── Step 5: Build filter_complex ─────────────────────────────────────────
+    # ── Step 5: Merge clips via sequential xfade (input count always 2) ───────
     # Only fade-family transitions for background — content/text animate independently
     _TRANSITIONS = [
         "fade", "dissolve", "fadeblack", "pixelize",
@@ -143,72 +123,37 @@ def render_video(
         "fade", "dissolve",
     ]
 
-    parts = []
-
-    # Static scale for each plate
-    for i in range(n):
-        parts.append(
-            f"[{i}:v]"
-            f"scale={res_w}:{res_h}:force_original_aspect_ratio=increase,"
-            f"crop={res_w}:{res_h},"
-            f"fps={fps},setsar=1"
-            f"[plate_{i}]"
-        )
-
-    # Zoompan animation for each content image
-    for i, ci in content_indices.items():
-        clip_dur = slide_durs[i] + (fade_dur if i < n - 1 else 0)
-        D        = max(1, int(clip_dur * fps))
-        zoom_rate = 0.04 / D
-        parts.append(
-            f"[{ci}:v]"
-            f"scale={CONTENT_W}:{CONTENT_H}:force_original_aspect_ratio=increase,"
-            f"crop={CONTENT_W}:{CONTENT_H},"
-            f"fps={fps},"
-            f"zoompan="
-            f"z='min(zoom+{zoom_rate:.6f},1.04)':"
-            f"x='(iw-iw/zoom)/2':"
-            f"y='(ih-ih/zoom)/2':"
-            f"d={D}:s={CONTENT_W}x{CONTENT_H}:fps={fps},"
-            f"setsar=1"
-            f"[anim_{i}]"
-        )
-
-    # Compose: overlay content onto plate (or use plate directly for intro)
-    for i in range(n):
-        if i in content_indices:
-            parts.append(
-                f"[plate_{i}][anim_{i}]"
-                f"overlay=x={CONTENT_X1}:y={CONTENT_Y1}:shortest=1"
-                f"[comp_{i}]"
-            )
-        else:
-            parts.append(f"[plate_{i}]null[comp_{i}]")
-
-    # xfade chain between composed frames
     if n == 1:
-        parts.append(f"[comp_0]trim=duration={total_dur:.3f},setpts=PTS-STARTPTS[pre_char]")
+        slideshow_path = clip_paths[0]
     else:
-        prev = "comp_0"
-        cumulative = 0.0
-        for i in range(n - 1):
-            nxt    = f"comp_{i + 1}"
-            out    = f"xf_{i + 1}" if i < n - 2 else "slideshow"
-            cumulative += slide_durs[i]
-            offset = max(cumulative - fade_dur, 0.0)
-            trans  = _TRANSITIONS[i % len(_TRANSITIONS)]
-            parts.append(
-                f"[{prev}][{nxt}]xfade=transition={trans}:duration={fade_dur:.3f}:offset={offset:.3f}[{out}]"
-            )
-            prev = out
-        parts.append(f"[slideshow]trim=duration={total_dur:.3f},setpts=PTS-STARTPTS[pre_char]")
+        slideshow_path, _ = merge_clips_sequential(
+            ffmpeg, clip_paths, slide_durs, fade_dur, _TRANSITIONS, clips_dir,
+        )
 
-    # Character overlay: composited on top of slideshow, never transitions
-    if char_idx is not None:
+    # ── Step 6: Final composite — character overlay + audio mix ───────────────
+    # 入力は video 1本 + character(あれば)1本 + narration/bgm/se の高々5本の
+    # みで、xfadeチェーンを含まないためスライド枚数nに依存せずメモリは一定。
+    inputs = ["-i", slideshow_path]
+    parts  = [f"[0:v]trim=duration={total_dur:.3f},setpts=PTS-STARTPTS[pre_char]"]
+
+    char_idx = None
+    if character_path:
+        char_idx = 1
+        inputs += ["-loop", "1", "-t", f"{total_dur:.3f}", "-i", character_path]
         parts.append(f"[{char_idx}:v]setsar=1[char_layer]")
         parts.append(f"[pre_char][char_layer]overlay=0:0:shortest=1[trimmed]")
     else:
         parts.append(f"[pre_char]null[trimmed]")
+
+    audio_idx = (char_idx + 1) if char_idx is not None else 1
+    inputs += ["-i", merged_audio]
+    bgm_idx = audio_idx + 1
+    inputs += ["-i", bgm_path]
+
+    se_idx = None
+    if has_se:
+        se_idx = bgm_idx + 1
+        inputs += ["-i", se_path]
 
     # BGM
     parts.append(
@@ -234,7 +179,6 @@ def render_video(
 
     filter_complex = ";".join(parts)
 
-    # ── Step 6: Pass 1 — compose video + audio ────────────────────────────────
     raw_video = output_path.replace(".mp4", "_raw.mp4")
     cmd_pass1 = (
         [ffmpeg, "-y"]
@@ -250,6 +194,7 @@ def render_video(
         ]
     )
     _run(cmd_pass1, "Video render pass1")
+    shutil.rmtree(clips_dir, ignore_errors=True)
 
     # ── Step 7: Pass 2 — subtitle burn + bottom accent line ───────────────────
     sub_dir  = os.path.dirname(subtitle_path)

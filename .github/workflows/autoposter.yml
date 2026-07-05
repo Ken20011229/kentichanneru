@@ -30,6 +30,17 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update -y && sudo apt-get install -y ffmpeg p7zip-full
 
+      # 動画レンダリング(zoompan+xfadeの多段filter_complex)がスライド数に応じて
+      # メモリを線形以上に消費し、標準ランナー(16GB)を使い切ってOOM相当で
+      # ランナーごと強制終了する事象が発生したための緩和策
+      - name: Add swap space
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
       - name: Cache VOICEVOX Engine
         id: cache-voicevox
         uses: actions/cache@v4
