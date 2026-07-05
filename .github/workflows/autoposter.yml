@@ -35,10 +35,11 @@ jobs:
       # ランナーごと強制終了する事象が発生したための緩和策
       - name: Add swap space
         run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          free -h
+          sudo fallocate -l 8G /swapfile_ci
+          sudo chmod 600 /swapfile_ci
+          sudo mkswap /swapfile_ci
+          sudo swapon /swapfile_ci
           free -h
 
       - name: Cache VOICEVOX Engine
