@@ -27,14 +27,19 @@ from src.video.shorts_slide_gen import generate_shorts_slides
 from src.video.subtitle_gen import generate_ass, generate_shorts_ass
 from src.video.thumbnail_gen import generate_shorts_thumbnail, generate_thumbnail
 from src.video.thumbnail_style_selector import select_style
+from src.bgm.bgm_moods import mood_for_channel, filter_by_mood
 
 logger = logging.getLogger(__name__)
 
 
-def _pick_bgm(bgm_files: list, bgm_dir: str) -> str:
-    """Pick BGM: prefer top-ranked from strategy.json, with weighted random fallback."""
+def _pick_bgm(bgm_files: list, bgm_dir: str, mood: str = None) -> str:
+    """Pick BGM: narrow to channel-appropriate mood first, then prefer
+    top-ranked (by past CTR/retention) from strategy.json within that mood."""
     if not bgm_files:
         return os.path.join(bgm_dir, "background.mp3")
+
+    if mood:
+        bgm_files = filter_by_mood(bgm_files, mood)
 
     strategy_file = "data/strategy.json"
     if os.path.exists(strategy_file):
@@ -258,8 +263,9 @@ def _run_shared_pipeline_stages(
     video_path = os.path.join(work_dir, "video", f"{run_id}.mp4")
     bgm_dir   = os.path.join("assets", "bgm")
     bgm_files = glob.glob(os.path.join(bgm_dir, "*.mp3"))
-    bgm_path  = _pick_bgm(bgm_files, bgm_dir)
-    logger.info(f"BGM: {os.path.basename(bgm_path)}")
+    bgm_mood  = mood_for_channel(channel["id"])
+    bgm_path  = _pick_bgm(bgm_files, bgm_dir, mood=bgm_mood)
+    logger.info(f"BGM: {os.path.basename(bgm_path)} (mood={bgm_mood})")
     se_path = config.get("se", {}).get("intro", os.path.join("assets", "se", "intro.mp3"))
     render_video(
         slide_plate_paths, slide_content_paths,

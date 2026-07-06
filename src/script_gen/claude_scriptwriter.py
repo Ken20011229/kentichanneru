@@ -8,35 +8,51 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 logger = logging.getLogger(__name__)
 
 _HINTS_FILE = "data/prompt_hints.json"
+_COMPETITOR_INSIGHTS_FILE = "data/competitor_insights.json"
 
 
-def _load_hints() -> str:
+def _load_hints(channel_id: str = None) -> str:
     """Load self-improvement hints and inject into prompt."""
-    if not Path(_HINTS_FILE).exists():
-        return ""
-    try:
-        with open(_HINTS_FILE, "r", encoding="utf-8") as f:
-            h = json.load(f)
-        lines = []
-        if h.get("style_notes"):
-            lines.append("## 過去の実績から学んだ改善点（必ず反映）")
-            for note in h["style_notes"]:
-                lines.append(f"- {note}")
-        if h.get("top_titles_by_view"):
-            lines.append("## 高再生数タイトル例（このスタイルを参考に）")
-            for t in h["top_titles_by_view"][:5]:
-                lines.append(f"- {t}")
-        if h.get("top_titles_by_retention"):
-            lines.append("## 高視聴維持率タイトル例（内容の深さを参考に）")
-            for t in h["top_titles_by_retention"][:3]:
-                lines.append(f"- {t}")
-        ctr = h.get("global_ctr_pct", 0)
-        ret = h.get("global_retention_sec", 0)
-        if ctr or ret:
-            lines.append(f"## 現在のチャンネル平均指標: CTR={ctr}% / 平均視聴時間={ret}秒")
-        return "\n".join(lines)
-    except Exception:
-        return ""
+    lines = []
+
+    if Path(_HINTS_FILE).exists():
+        try:
+            with open(_HINTS_FILE, "r", encoding="utf-8") as f:
+                h = json.load(f)
+            if h.get("style_notes"):
+                lines.append("## 過去の実績から学んだ改善点（必ず反映）")
+                for note in h["style_notes"]:
+                    lines.append(f"- {note}")
+            if h.get("top_titles_by_view"):
+                lines.append("## 高再生数タイトル例（このスタイルを参考に）")
+                for t in h["top_titles_by_view"][:5]:
+                    lines.append(f"- {t}")
+            if h.get("top_titles_by_retention"):
+                lines.append("## 高視聴維持率タイトル例（内容の深さを参考に）")
+                for t in h["top_titles_by_retention"][:3]:
+                    lines.append(f"- {t}")
+            ctr = h.get("global_ctr_pct", 0)
+            ret = h.get("global_retention_sec", 0)
+            if ctr or ret:
+                lines.append(f"## 現在のチャンネル平均指標: CTR={ctr}% / 平均視聴時間={ret}秒")
+        except Exception:
+            pass
+
+    if channel_id and Path(_COMPETITOR_INSIGHTS_FILE).exists():
+        try:
+            with open(_COMPETITOR_INSIGHTS_FILE, "r", encoding="utf-8") as f:
+                comp = json.load(f)
+            genre = comp.get(channel_id)
+            if genre:
+                lines.append("## 同ジャンルで今伸びている他チャンネルのタイトル例（参考にする、コピーはしない）")
+                for t in genre.get("top_titles", [])[:5]:
+                    lines.append(f"- {t}")
+                if genre.get("top_bracket_patterns"):
+                    lines.append(f"よく使われる【】パターン: {'、'.join(genre['top_bracket_patterns'])}")
+        except Exception:
+            pass
+
+    return "\n".join(lines)
 
 _RESEARCH_PROMPT = """\
 以下は最近のYouTube動画タイトルです。このタイトルから「視聴者が深く学べる一般的・教育的テーマ」を抽出し、そのテーマについて詳しい調査レポートを日本語で作成してください。
@@ -192,7 +208,7 @@ class ClaudeScriptWriter:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=4, max=30))
     def generate(self, item: dict, channel: dict = None) -> dict:
         ch    = channel or {}
-        hints = _load_hints()
+        hints = _load_hints(channel_id=ch.get("id"))
         prompt = SCRIPT_PROMPT.format(
             channel_name=ch.get("name", "ニュース"),
             script_style=ch.get("script_style", "ニュースキャスター。客観的・正確・簡潔に伝える。"),

@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--analyze",        action="store_true", help="Run self-improvement analysis and update strategy")
     parser.add_argument("--test-analytics", action="store_true", help="Test YouTube Analytics API connection")
     parser.add_argument("--test-trends",    action="store_true", help="Test Google Trends fetch")
+    parser.add_argument("--analyze-competitors", action="store_true", help="Fetch top competitor videos per genre")
     parser.add_argument("--config", default="config/config.yaml")
     args = parser.parse_args()
 
@@ -79,6 +80,13 @@ def main():
             for t in rt[:5]:
                 logger.info(f"  [{t['trend_rank']}] {t['title']}")
 
+    elif args.analyze_competitors:
+        logger.info("Analyzing competitor videos per genre...")
+        from src.uploader.youtube_uploader import YouTubeUploader
+        from src.analytics.competitor_analyzer import run as analyze_competitors
+        uploader = YouTubeUploader(config)
+        analyze_competitors(uploader.service, config["channels"])
+
     elif args.update_stats or args.analyze:
         from src.uploader.youtube_uploader import YouTubeUploader
         uploader = YouTubeUploader(config)
@@ -96,6 +104,13 @@ def main():
             logger.info("Analytics API (CTR/retention) updated.")
         except Exception as e:
             logger.warning(f"Analytics API unavailable (CTR/retention skipped): {e}")
+
+        # Fetch competitor title patterns per genre (best-effort, non-fatal)
+        try:
+            from src.analytics.competitor_analyzer import run as analyze_competitors
+            analyze_competitors(service, config["channels"])
+        except Exception as e:
+            logger.warning(f"Competitor analysis skipped: {e}")
 
         # Always run self-improvement analysis after stats update
         logger.info("Running self-improvement analysis...")
