@@ -278,11 +278,13 @@ def _run_shared_pipeline_stages(
     # Stage 8: Generate thumbnail
     thumb_style = select_style()
     thumbnail_path = os.path.join(work_dir, "thumbnails", "thumb.jpg")
+    logger.info(f"Stage 8: generating thumbnail (style={thumb_style})...")
     generate_thumbnail(
         image_paths[0], script_data["thumbnail_title"], thumbnail_path, config,
         reaction_text=script_data.get("reaction_text", ""),
         style=thumb_style,
     )
+    logger.info("Stage 8: thumbnail done")
 
     # Stage 8b: Render Shorts
     shorts_dir  = os.path.join(work_dir, "shorts")
@@ -291,6 +293,7 @@ def _run_shared_pipeline_stages(
     os.makedirs(shorts_dir, exist_ok=True)
 
     if shorts_audio_segments:
+        logger.info("Stage 8b: composing shorts narration audio...")
         shorts_narration = os.path.join(shorts_dir, "shorts_narration.wav")
         compose_audio([s["audio_path"] for s in shorts_audio_segments], shorts_narration, ffmpeg_path)
         shorts_dur = min(sum(s["duration_sec"] for s in shorts_audio_segments) + 0.3, 58.0)
@@ -306,6 +309,7 @@ def _run_shared_pipeline_stages(
                 (i, seg) for i, seg in enumerate(shorts_audio_segments)
                 if seg.get("visual_type") == "image" and seg.get("image_prompt", "").strip()
             ]
+            logger.info(f"Stage 8b: generating {len(shorts_img_segs[:2])} shorts segment images via HF...")
             for s_idx, s_seg in shorts_img_segs[:2]:
                 s_prompt   = s_seg["image_prompt"]
                 s_out_path = os.path.join(image_dir, f"shorts_seg_{s_idx:03d}.jpg")
@@ -313,7 +317,9 @@ def _run_shared_pipeline_stages(
                 if s_result:
                     shorts_segment_images[s_idx] = s_result
                     logger.info(f"Shorts segment {s_idx} portrait image generated")
+            logger.info("Stage 8b: shorts segment image generation done")
 
+        logger.info("Stage 8b: generating shorts slides...")
         shorts_slide_dir = os.path.join(work_dir, "shorts_slides")
         shorts_plate_paths, shorts_content_paths = generate_shorts_slides(
             shorts_audio_segments,
@@ -323,6 +329,7 @@ def _run_shared_pipeline_stages(
             bg_image_path=bg_image_path,
             segment_images=shorts_segment_images,
         )
+        logger.info("Stage 8b: shorts slides done")
         per_shorts_durations = [s["duration_sec"] for s in shorts_audio_segments]
     else:
         shorts_dur = 58.0
@@ -334,12 +341,14 @@ def _run_shared_pipeline_stages(
         per_shorts_durations = None
 
     shorts_thumb_path = os.path.join(shorts_dir, "shorts_thumb.jpg")
+    logger.info("Stage 8b: generating shorts thumbnail...")
     try:
         generate_shorts_thumbnail(script_data["thumbnail_title"], shorts_thumb_path, config)
     except Exception as e:
         logger.warning(f"Shorts thumbnail generation failed: {e}")
         shorts_thumb_path = thumbnail_path
 
+    logger.info(f"Stage 8b: rendering shorts video ({len(shorts_plate_paths)} slides)...")
     try:
         render_shorts(
             shorts_plate_paths, shorts_content_paths,

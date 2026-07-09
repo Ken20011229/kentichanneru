@@ -14,6 +14,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from src.images.safe_open import safe_open_rgba
+
 logger = logging.getLogger(__name__)
 
 # ── Canvas dimensions ──────────────────────────────────────────────────────────
@@ -80,7 +82,7 @@ def _wrap_px(draw, text, font, max_w) -> list[str]:
 
 def _photo_bg(path: str, dark: bool = False) -> Image.Image:
     try:
-        img = Image.open(path).convert("RGBA")
+        img = safe_open_rgba(path)
         ir = img.width / img.height
         cr = W / H
         nw, nh = (int(H * ir), H) if ir > cr else (W, int(W / ir))
@@ -293,7 +295,7 @@ def _plate_standard(fp, accent, section_num, badge_label,
 
 def _content_from_image(image_path: str) -> Image.Image:
     """Load and fit an image into the content area dimensions."""
-    img = Image.open(image_path).convert("RGB")
+    img = safe_open_rgba(image_path).convert("RGB")
     ir  = img.width / img.height
     cr  = CONTENT_W / CONTENT_H
     if ir > cr:

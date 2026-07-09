@@ -4,6 +4,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from src.images.safe_open import safe_open_rgba
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_ACCENT = (245, 166, 35)
@@ -278,7 +280,7 @@ def generate_thumbnail(
 
     # ── 1. Background: photo if available, else dark bokeh ───────
     if background_image_path and Path(background_image_path).exists():
-        img = Image.open(background_image_path).convert("RGBA")
+        img = safe_open_rgba(background_image_path)
         ir = img.width / img.height
         cr = W / H
         if ir > cr:
@@ -564,7 +566,7 @@ def _bg_from_photo(bg_image_path: str, W: int, H: int,
                    blur: int = 6, overlay_alpha: int = 185) -> Image.Image:
     """Crop+blur a photo and add a dark overlay. Returns RGBA canvas."""
     if bg_image_path and Path(bg_image_path).exists():
-        img = Image.open(bg_image_path).convert("RGBA")
+        img = safe_open_rgba(bg_image_path)
         ir, cr = img.width / img.height, W / H
         if ir > cr:
             nw, nh = int(H * ir), H

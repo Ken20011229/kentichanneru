@@ -15,19 +15,19 @@ class HuggingFaceImageClient:
     def __init__(self, api_token: str):
         self.headers = {"Authorization": f"Bearer {api_token}"}
 
-    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=2, min=5, max=60))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=5, max=30))
     def generate(self, prompt: str, width: int = 1280, height: int = 720) -> bytes:
         payload = {
             "inputs": prompt,
             "parameters": {"width": width, "height": height},
         }
-        resp = requests.post(API_URL, headers=self.headers, json=payload, timeout=120)
+        resp = requests.post(API_URL, headers=self.headers, json=payload, timeout=45)
 
         if resp.status_code == 503:
             # モデルウォームアップ中
             wait_sec = resp.json().get("estimated_time", 20)
             logger.info(f"HuggingFace model loading, waiting {wait_sec:.0f}s...")
-            time.sleep(min(wait_sec, 60))
+            time.sleep(min(wait_sec, 30))
             raise RuntimeError("Model was loading, retrying")
 
         resp.raise_for_status()
