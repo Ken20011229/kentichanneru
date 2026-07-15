@@ -200,7 +200,7 @@ def _paste_chars_dark(canvas: Image.Image, right_path: str, left_path: str,
 
     # Zundamon (right, front, larger)
     if right_path and Path(right_path).exists():
-        img = Image.open(right_path).convert("RGBA")
+        img = safe_open_rgba(right_path)
         bbox = img.getbbox()
         if bbox:
             img = img.crop(bbox)
@@ -218,7 +218,7 @@ def _paste_chars_dark(canvas: Image.Image, right_path: str, left_path: str,
 
     # Tsumugi (left of Zundamon, slightly smaller, behind)
     if left_path and Path(left_path).exists():
-        img = Image.open(left_path).convert("RGBA")
+        img = safe_open_rgba(left_path)
         bbox = img.getbbox()
         if bbox:
             img = img.crop(bbox)
@@ -437,7 +437,7 @@ def generate_shorts_thumbnail(
     char_path = char_cfg.get("image_path", "")
     char_top  = H  # fallback if no character
     if char_path and Path(char_path).exists():
-        char_img = Image.open(char_path).convert("RGBA")
+        char_img = safe_open_rgba(char_path)
         bbox = char_img.getbbox()
         if bbox:
             char_img = char_img.crop(bbox)
@@ -612,7 +612,7 @@ def _paste_chars_small(canvas: Image.Image, right_path: str, left_path: str,
     """Paste smaller characters (for IMPACT). Returns (canvas, char_inner_x)."""
     inner_x = W
     if right_path and Path(right_path).exists():
-        img = Image.open(right_path).convert("RGBA")
+        img = safe_open_rgba(right_path)
         bbox = img.getbbox()
         if bbox:
             img = img.crop(bbox)
@@ -625,7 +625,7 @@ def _paste_chars_small(canvas: Image.Image, right_path: str, left_path: str,
         inner_x = zx
 
     if left_path and Path(left_path).exists():
-        img = Image.open(left_path).convert("RGBA")
+        img = safe_open_rgba(left_path)
         bbox = img.getbbox()
         if bbox:
             img = img.crop(bbox)

@@ -121,7 +121,7 @@ def _paste_char(canvas, path, side="right"):
     if not path or not Path(path).exists():
         return canvas
     try:
-        img = Image.open(path).convert("RGBA")
+        img = safe_open_rgba(path)
         if side == "left":
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
         bbox = img.getbbox()
