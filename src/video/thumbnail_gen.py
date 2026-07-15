@@ -6,7 +6,21 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from src.images.safe_open import safe_open_rgba
 
+try:
+    import resource
+except ImportError:
+    resource = None
+
 logger = logging.getLogger(__name__)
+
+
+def _memlog(tag: str) -> None:
+    """Debug instrumentation for tracking down the 2026-07-15 thumbnail-stage OOM."""
+    if resource is None:
+        return
+    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    logger.info(f"[thumbmem] {tag}: rss={rss_mb:.0f}MB")
+
 
 _DEFAULT_ACCENT = (245, 166, 35)
 
@@ -197,10 +211,12 @@ def _paste_chars_dark(canvas: Image.Image, right_path: str, left_path: str,
                       W: int, H: int) -> tuple:
     """Paste both characters on the right half. Returns inner_left_x of leftmost char."""
     inner_x = W
+    _memlog("paste_chars_dark:start")
 
     # Zundamon (right, front, larger)
     if right_path and Path(right_path).exists():
         img = safe_open_rgba(right_path)
+        _memlog(f"paste_chars_dark:right:opened size={img.size}")
         bbox = img.getbbox()
         if bbox:
             img = img.crop(bbox)
@@ -208,17 +224,20 @@ def _paste_chars_dark(canvas: Image.Image, right_path: str, left_path: str,
         ratio    = target_h / img.height
         target_w = int(img.width * ratio)
         img      = img.resize((target_w, target_h), Image.LANCZOS)
+        _memlog("paste_chars_dark:right:resized")
         bleed    = int(target_w * 0.08)
         zx       = W - target_w + bleed
         zy       = H - target_h
         canvas.paste(img, (zx, zy), img)
         inner_x  = zx
+        _memlog("paste_chars_dark:right:pasted")
     else:
         zx = W
 
     # Tsumugi (left of Zundamon, slightly smaller, behind)
     if left_path and Path(left_path).exists():
         img = safe_open_rgba(left_path)
+        _memlog(f"paste_chars_dark:left:opened size={img.size}")
         bbox = img.getbbox()
         if bbox:
             img = img.crop(bbox)
@@ -226,12 +245,15 @@ def _paste_chars_dark(canvas: Image.Image, right_path: str, left_path: str,
         ratio    = target_h / img.height
         target_w = int(img.width * ratio)
         img      = img.resize((target_w, target_h), Image.LANCZOS)
+        _memlog("paste_chars_dark:left:resized")
         overlap  = int(target_w * 0.12)
         tx       = zx - target_w + overlap
         ty       = H - target_h
         canvas.paste(img, (tx, ty), img)
         inner_x  = tx
+        _memlog("paste_chars_dark:left:pasted")
 
+    _memlog("paste_chars_dark:end")
     return canvas, inner_x
 
 
@@ -275,9 +297,11 @@ def generate_thumbnail(
         canvas = _RENDERERS[style](**_render_kwargs)
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         canvas.convert("RGB").save(output_path, "JPEG", quality=95)
+        _memlog(f"generate_thumbnail:{style}:saved")
         logger.info(f"Thumbnail ({style}) → {output_path}")
         return output_path
 
+    _memlog("generate_thumbnail:SPLIT:start")
     # ── 1. Background: photo if available, else dark bokeh ───────
     if background_image_path and Path(background_image_path).exists():
         img = safe_open_rgba(background_image_path)
@@ -302,9 +326,11 @@ def generate_thumbnail(
             canvas = Image.alpha_composite(canvas, blob.filter(ImageFilter.GaussianBlur(r // 1.4)))
     else:
         canvas = _make_dark_bg(W, H, accent)
+    _memlog("generate_thumbnail:SPLIT:bg_done")
 
     # ── 2. Both characters on right half ─────────────────────────
     canvas, char_inner_x = _paste_chars_dark(canvas, right_path, left_path, W, H)
+    _memlog("generate_thumbnail:SPLIT:chars_done")
 
     draw = ImageDraw.Draw(canvas)
 
@@ -353,6 +379,7 @@ def generate_thumbnail(
         TITLE_Y += hh + hpy * 2 + 18
 
     # Auto-size title font
+    _memlog("generate_thumbnail:SPLIT:before_font_loop")
     for size in (114, 96, 80, 66, 54, 44):
         ft    = _font(fp, size)
         lines = _wrap_px(draw, main_text, ft, MAX_TW)
@@ -364,12 +391,14 @@ def generate_thumbnail(
     else:
         font_title = _font(fp, 44)
         lines = _wrap_px(draw, main_text, font_title, MAX_TW)
+    _memlog(f"generate_thumbnail:SPLIT:after_font_loop lines={len(lines)}")
 
     lh = max((_th(draw, ln, font_title) for ln in lines), default=52) + 12
     ty = TITLE_Y
     for ln in lines:
         _draw_mixed_line(draw, ln, font_title, TX, ty, _TITLE_YELLOW, accent, stroke_width=5)
         ty += lh
+    _memlog("generate_thumbnail:SPLIT:title_drawn")
 
     # ── 5. Speech bubble (reaction_text) ─────────────────────────
     if reaction_text and reaction_text.strip():
@@ -384,12 +413,15 @@ def generate_thumbnail(
         canvas = _draw_speech_bubble(canvas, reaction_text.strip(), font_bub,
                                      bub_x, bub_y, accent)
         draw = ImageDraw.Draw(canvas)
+        _memlog("generate_thumbnail:SPLIT:bubble_drawn")
 
     # ── 6. Bottom accent stripe ───────────────────────────────────
     draw.rectangle([(0, H - 6), (W, H)], fill=(*accent, 255))
 
+    _memlog("generate_thumbnail:SPLIT:before_save")
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     canvas.convert("RGB").save(output_path, "JPEG", quality=95)
+    _memlog("generate_thumbnail:SPLIT:saved")
     logger.info(f"Thumbnail generated: {output_path}")
     return output_path
 
@@ -882,18 +914,22 @@ def _render_band(*, bg_image_path: str, title_text: str, reaction_text: str,
                  episode_label: str, channel_name: str,
                  right_path: str, left_path: str) -> Image.Image:
     """Dark bg + thick left accent stripe, title vertically centered — bold graphic design."""
+    _memlog("render_band:start")
     canvas = _bg_from_photo(bg_image_path, W, H, blur=6, overlay_alpha=180)
     if canvas is None:
         canvas = _make_dark_bg(W, H, accent)
+    _memlog("render_band:bg_done")
     # Extra bokeh for depth
-    for rx, ry, r, color in _BOKEH_DARK:
+    for i, (rx, ry, r, color) in enumerate(_BOKEH_DARK):
         blob = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         ImageDraw.Draw(blob).ellipse(
             [(int(W * rx) - r, int(H * ry) - r),
              (int(W * rx) + r, int(H * ry) + r)], fill=color)
         canvas = Image.alpha_composite(canvas, blob.filter(ImageFilter.GaussianBlur(r // 1.4)))
+        _memlog(f"render_band:bokeh:{i}")
 
     canvas, char_inner_x = _paste_chars_dark(canvas, right_path, left_path, W, H)
+    _memlog("render_band:chars_done")
 
     draw = ImageDraw.Draw(canvas)
 
@@ -915,6 +951,7 @@ def _render_band(*, bg_image_path: str, title_text: str, reaction_text: str,
     TX = BAND_W + 18
     MAX_TW = char_inner_x - TX - 30
 
+    _memlog("render_band:before_font_loop")
     for size in (110, 94, 80, 66, 54, 44):
         ft = _font(fp, size)
         lines = _wrap_px(draw, main_text, ft, MAX_TW)
@@ -929,6 +966,7 @@ def _render_band(*, bg_image_path: str, title_text: str, reaction_text: str,
         lines = _wrap_px(draw, main_text, font_title, MAX_TW)
         lh = max((_th(draw, ln, font_title) for ln in lines), default=44) + 14
         total_h = lh * len(lines)
+    _memlog(f"render_band:after_font_loop lines={len(lines)}")
 
     avail = H - 30 - label_y
     TITLE_Y = label_y + max(0, (avail - total_h) // 2)
@@ -947,6 +985,7 @@ def _render_band(*, bg_image_path: str, title_text: str, reaction_text: str,
     for ln in lines:
         _draw_mixed_line(draw, ln, font_title, TX, ty, (255, 255, 255), accent, stroke_width=5)
         ty += lh_actual
+    _memlog("render_band:title_drawn")
 
     # Speech bubble
     if reaction_text and reaction_text.strip():
@@ -956,5 +995,7 @@ def _render_band(*, bg_image_path: str, title_text: str, reaction_text: str,
         bub_x = max(char_inner_x, W - bub_w - 20)
         canvas = _draw_speech_bubble(canvas, reaction_text.strip(), font_bub, bub_x, 26, accent)
         draw = ImageDraw.Draw(canvas)
+        _memlog("render_band:bubble_drawn")
 
+    _memlog("render_band:end")
     return canvas
