@@ -1,0 +1,63 @@
+name: Debug Thumbnail OOM
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install minimal dependencies
+        run: pip install Pillow requests PyYAML tenacity
+
+      - name: Fetch real Pexels image + generate thumbnails with memory monitoring
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: |
+          ( while true; do
+              echo "[monitor] $(date -u +%H:%M:%S) $(free -m | awk '/^Mem:/{print "mem="$3"MB/"$2"MB"}')"
+              sleep 5
+            done ) &
+          MONITOR_PID=$!
+          set +e
+          export PYTHONPATH="$PWD"
+          python - <<'PYEOF'
+          import logging
+          logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+
+          import os
+          import yaml
+          from src.images.pexels_client import PexelsClient
+          from src.video.thumbnail_gen import generate_thumbnail
+
+          client = PexelsClient(os.environ["PEXELS_API_KEY"])
+          photos = client.search("technology news office", per_page=3)
+          bg_path = client.download(photos[0], "/tmp/dbg_images")
+          print("bg image:", bg_path)
+
+          with open("config/config.yaml", encoding="utf-8") as f:
+              config = yaml.safe_load(f)
+          config["active_channel"] = {"id": "news", "name": "デバッグチャンネル", "accent_color": [230, 60, 60]}
+
+          for style in ["SPLIT", "BAND", "IMPACT", "NEON", "CARD"]:
+              print(f"=== style={style} ===")
+              out = generate_thumbnail(
+                  bg_path,
+                  "【衝撃】デバッグ用ロングタイトルでOOM再現テストを実施しています問題ないか確認する",
+                  f"/tmp/dbg_thumb_{style}.jpg",
+                  config,
+                  reaction_text="マジで!?",
+                  style=style,
+              )
+              print("done:", out)
+          print("ALL STYLES OK")
+          PYEOF
+          EXIT_CODE=$?
+          set -e
+          kill "$MONITOR_PID" 2>/dev/null || true
+          exit $EXIT_CODE
