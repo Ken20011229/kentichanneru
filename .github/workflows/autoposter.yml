@@ -107,6 +107,7 @@ jobs:
           # 15秒おきにライブログへ流す（強制終了直前の状態を後から確認できるようにする）
           ( while true; do
               echo "[monitor] $(date -u +%H:%M:%S) $(free -m | awk '/^Mem:/{print "mem="$3"MB/"$2"MB"}') disk_avail=$(df -h --output=avail / | tail -1 | tr -d ' ')"
+              echo "[monitor-ps] $(ps -eo pid,ppid,rss,comm --sort=-rss | head -8 | tr '\n' '|')"
               sleep 15
             done ) &
           MONITOR_PID=$!

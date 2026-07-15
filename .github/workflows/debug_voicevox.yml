@@ -1,0 +1,103 @@
+name: Debug VOICEVOX Memory
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache VOICEVOX Engine
+        id: cache-voicevox
+        uses: actions/cache@v4
+        with:
+          path: voicevox_engine
+          key: voicevox-engine-0.25.2-linux-x64
+
+      - name: Download & Extract VOICEVOX Engine
+        if: steps.cache-voicevox.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y p7zip-full
+          wget -q "https://github.com/VOICEVOX/voicevox_engine/releases/download/0.25.2/voicevox_engine-linux-cpu-x64-0.25.2.7z.001" -O voicevox.7z.001
+          mkdir -p voicevox_raw
+          7z x voicevox.7z.001 -o./voicevox_raw/ -y
+          rm voicevox.7z.001
+          RUN_PATH=$(find voicevox_raw -name "run" -type f | head -1)
+          ENGINE_DIR=$(dirname "$RUN_PATH")
+          mv "$ENGINE_DIR" voicevox_engine
+          rm -rf voicevox_raw
+
+      - name: Start VOICEVOX Engine
+        run: |
+          chmod +x voicevox_engine/run
+          ./voicevox_engine/run --host 127.0.0.1 --port 50021 &
+          for i in $(seq 1 60); do
+            if curl -s http://127.0.0.1:50021/version > /dev/null 2>&1; then
+              echo "VOICEVOX ready: $(curl -s http://127.0.0.1:50021/version)"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Install minimal dependencies
+        run: pip install Pillow requests PyYAML tenacity
+
+      - name: Synthesize 16 segments then generate thumbnails, tracking per-process RSS
+        run: |
+          ( while true; do
+              echo "[monitor] $(date -u +%H:%M:%S) $(free -m | awk '/^Mem:/{print "mem="$3"MB/"$2"MB"}')"
+              echo "[monitor-ps] $(ps -eo pid,ppid,rss,comm --sort=-rss | head -8 | tr '\n' '|')"
+              sleep 5
+            done ) &
+          MONITOR_PID=$!
+          set +e
+          export PYTHONPATH="$PWD"
+          python - <<'PYEOF'
+          import logging
+          logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+
+          import yaml
+          from src.tts.voicevox_client import VoicevoxClient
+          from src.video.thumbnail_gen import generate_thumbnail
+
+          with open("config/config.yaml", encoding="utf-8") as f:
+              config = yaml.safe_load(f)
+
+          client = VoicevoxClient(config["voicevox"])
+
+          # 本番と同程度の分量(150-200字/セグメント x 16セグメント)のダミー原稿で
+          # VOICEVOX側にメモリリークがないか確認する
+          base_text = (
+              "これはVOICEVOXのメモリリーク調査のためのテストナレーションです。"
+              "本番のニュース動画では各セグメントがだいたい150文字から200文字程度になるように"
+              "台本を生成しているため、それに近い分量のテキストを用意して繰り返し音声合成を行い、"
+              "エンジン側のメモリ使用量がリクエストを重ねるごとに増え続けていないかを確認します。"
+          )
+          segments = [{"text": base_text} for _ in range(16)]
+
+          print("=== synthesizing 16 segments ===")
+          results = client.synthesize_segments(segments, "/tmp/dbg_audio")
+          print(f"done: {len(results)} segments synthesized")
+
+          print("=== generating thumbnails while VOICEVOX still running ===")
+          config["active_channel"] = {"id": "news", "name": "デバッグチャンネル", "accent_color": [230, 60, 60]}
+          for style in ["SPLIT", "BAND", "IMPACT", "NEON", "CARD"]:
+              out = generate_thumbnail(
+                  "", "【衝撃】VOICEVOX起動中サムネイル生成デバッグテストを実施しています",
+                  f"/tmp/dbg_thumb_vv_{style}.jpg", config,
+                  reaction_text="マジで!?", style=style,
+              )
+              print("done:", out)
+          print("ALL DONE")
+          PYEOF
+          EXIT_CODE=$?
+          set -e
+          kill "$MONITOR_PID" 2>/dev/null || true
+          exit $EXIT_CODE
