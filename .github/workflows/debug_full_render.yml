@@ -1,0 +1,174 @@
+name: Debug Full Render OOM (no Groq)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y ffmpeg p7zip-full
+
+      - name: Add swap space
+        run: |
+          free -h
+          sudo fallocate -l 8G /swapfile_ci
+          sudo chmod 600 /swapfile_ci
+          sudo mkswap /swapfile_ci
+          sudo swapon /swapfile_ci
+          free -h
+
+      - name: Cache VOICEVOX Engine
+        id: cache-voicevox
+        uses: actions/cache@v4
+        with:
+          path: voicevox_engine
+          key: voicevox-engine-0.25.2-linux-x64
+
+      - name: Download & Extract VOICEVOX Engine
+        if: steps.cache-voicevox.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://github.com/VOICEVOX/voicevox_engine/releases/download/0.25.2/voicevox_engine-linux-cpu-x64-0.25.2.7z.001" -O voicevox.7z.001
+          mkdir -p voicevox_raw
+          7z x voicevox.7z.001 -o./voicevox_raw/ -y
+          rm voicevox.7z.001
+          RUN_PATH=$(find voicevox_raw -name "run" -type f | head -1)
+          ENGINE_DIR=$(dirname "$RUN_PATH")
+          mv "$ENGINE_DIR" voicevox_engine
+          rm -rf voicevox_raw
+
+      - name: Start VOICEVOX Engine
+        run: |
+          chmod +x voicevox_engine/run
+          ./voicevox_engine/run --host 127.0.0.1 --port 50021 &
+          for i in $(seq 1 60); do
+            if curl -s http://127.0.0.1:50021/version > /dev/null 2>&1; then
+              echo "VOICEVOX ready: $(curl -s http://127.0.0.1:50021/version)"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Stage 4-8 (TTS -> images -> slides -> render -> thumbnail) without Groq
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          FFMPEG_PATH: ffmpeg
+        run: |
+          ( while true; do
+              echo "[monitor] $(date -u +%H:%M:%S) $(free -m | awk '/^Mem:/{print "mem="$3"MB/"$2"MB"}') disk_avail=$(df -h --output=avail / | tail -1 | tr -d ' ')"
+              echo "[monitor-ps] $(ps -eo pid,ppid,rss,comm --sort=-rss | head -8 | tr '\n' '|')"
+              sleep 10
+            done ) &
+          MONITOR_PID=$!
+          set +e
+          export PYTHONPATH="$PWD"
+          python - <<'PYEOF'
+          import logging
+          logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+
+          import os
+          import yaml
+          from src.tts.voicevox_client import VoicevoxClient
+          from src.images.pexels_client import PexelsClient
+          from src.video.slide_gen import generate_slides, generate_character_overlay
+          from src.video.subtitle_gen import generate_ass
+          from src.video.composer import render_video
+          from src.video.thumbnail_gen import generate_thumbnail
+
+          with open("config/config.yaml", encoding="utf-8") as f:
+              config = yaml.safe_load(f)
+          config["active_channel"] = {
+              "id": "news", "name": "デバッグチャンネル",
+              "accent_color": [230, 60, 60], "badge_label": "デバッグ速報",
+          }
+          config["video"]["ffmpeg_path"] = "ffmpeg"
+
+          work_dir = "/tmp/dbg_full_pipeline"
+          os.makedirs(work_dir, exist_ok=True)
+
+          base_text = (
+              "これはOOM再現テストのためのダミーナレーションです。"
+              "本番のニュース動画と同程度の分量になるよう各セグメントをおよそ150文字から200文字程度に"
+              "調整しています。VOICEVOXで音声合成し、実際の動画レンダリングパイプラインを最初から最後まで"
+              "通してサムネイル生成の直前までにどこでメモリが膨張するのかを特定するのが目的です。"
+          )
+          script_segments = [
+              {"text": base_text, "keyword": f"キーワード{i}", "visual_type": "detail", "segment_index": i}
+              for i in range(16)
+          ]
+          title = "【デバッグ】OOM再現テスト用ロングタイトルサンプルです"
+          thumbnail_title = "【衝撃】デバッグ用サムネイルタイトルでOOM再現テストを実施しています"
+
+          print("=== Stage 4: TTS synthesis ===")
+          client = VoicevoxClient(config["voicevox"])
+          audio_dir = os.path.join(work_dir, "audio")
+          audio_segments = client.synthesize_segments(script_segments, audio_dir)
+          total_dur = sum(s["duration_sec"] for s in audio_segments)
+          print(f"done: {len(audio_segments)} segments, {total_dur:.1f}s total")
+
+          print("=== Stage 5: fetch Pexels image ===")
+          pexels = PexelsClient(os.environ["PEXELS_API_KEY"])
+          image_dir = os.path.join(work_dir, "images")
+          image_paths = pexels.fetch_images_for_keywords(["technology news office"], image_dir, total=1)
+          bg_image_path = image_paths[0]
+          print("bg image:", bg_image_path)
+
+          print("=== Stage 5.5b: character overlay ===")
+          char_overlay_path = os.path.join(work_dir, "char_overlay.png")
+          try:
+              generate_character_overlay(config, char_overlay_path)
+          except Exception as e:
+              print("character overlay failed:", e)
+              char_overlay_path = None
+
+          print("=== Stage 5.5c: generate slides ===")
+          slide_dir = os.path.join(work_dir, "slides")
+          os.makedirs(slide_dir, exist_ok=True)
+          slide_plate_paths, slide_content_paths = generate_slides(
+              script_segments, title=title, config=config,
+              output_dir=slide_dir, bg_image_path=bg_image_path, segment_images={},
+          )
+          per_slide_durations = [s["duration_sec"] for s in audio_segments]
+          print(f"done: {len(slide_plate_paths)} slides")
+
+          print("=== Stage 6: subtitles ===")
+          subtitle_path = os.path.join(work_dir, "subtitles", "subs.ass")
+          generate_ass(audio_segments, subtitle_path, channel=config["active_channel"])
+
+          print("=== Stage 7: render video (ffmpeg) ===")
+          video_path = os.path.join(work_dir, "video", "debug.mp4")
+          bgm_path = "assets/bgm/Rain_Drop.mp3"
+          se_path = config.get("se", {}).get("intro", "assets/se/intro.mp3")
+          render_video(
+              slide_plate_paths, slide_content_paths, audio_segments,
+              bgm_path, subtitle_path, video_path, config,
+              character_path=char_overlay_path, se_path=se_path,
+              per_slide_durations=per_slide_durations,
+          )
+          print("=== Stage 7 done: Video rendered ===")
+
+          print("=== Stage 8: generate thumbnail ===")
+          for style in ["SPLIT", "BAND", "IMPACT", "NEON", "CARD"]:
+              thumbnail_path = os.path.join(work_dir, f"thumb_{style}.jpg")
+              generate_thumbnail(
+                  bg_image_path, thumbnail_title, thumbnail_path, config,
+                  reaction_text="マジで!?", style=style,
+              )
+              print("done:", style)
+          print("ALL DONE")
+          PYEOF
+          EXIT_CODE=$?
+          set -e
+          kill "$MONITOR_PID" 2>/dev/null || true
+          exit $EXIT_CODE
