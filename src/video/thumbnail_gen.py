@@ -120,10 +120,12 @@ def _split_highlights(text: str) -> list[tuple[str, bool]]:
                 parts.append((text[i:end + 1], True))
                 i = end + 1
                 continue
-        next_open = text.find("「", i)
+        # Not a highlight start, or an unclosed 「 — search strictly after
+        # the current position so `i` always advances (an unclosed 「 would
+        # otherwise match itself at the same index and spin forever).
+        next_open = text.find("「", i + 1)
         if next_open == -1:
-            if i < len(text):
-                parts.append((text[i:], False))
+            parts.append((text[i:], False))
             break
         parts.append((text[i:next_open], False))
         i = next_open
