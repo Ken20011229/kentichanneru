@@ -468,7 +468,14 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
                     item["summary"] = translated[1]
                 logger.info(f"Retrying with next item: '{item['title']}'")
         if script_data is None:
-            raise RuntimeError("All item attempts exhausted without generating a script")
+            logger.warning(
+                f"All 6 item attempts failed via generate(); "
+                f"falling back to deep-dive expansion for '{item['title']}'"
+            )
+            try:
+                script_data = writer.generate_deep_dive(item["title"], channel=channel)
+            except Exception as e:
+                raise RuntimeError("All item attempts exhausted without generating a script") from e
         logger.info(f"Script generated: '{script_data['title']}' ({len(script_data['script_segments'])} segments)")
 
         return _run_shared_pipeline_stages(
