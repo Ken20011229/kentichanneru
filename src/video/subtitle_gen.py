@@ -219,8 +219,8 @@ Timer: 100.0000
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV
-Style: Main,Noto Sans CJK JP,88,&H00FFFFFF,&H00000000,{dark_box},-1,0,3,0,0,2,60,60,140
-Style: Hook,Noto Sans CJK JP,96,{_ass_color(r, g, b)},&H99000000,{dark_box},-1,0,3,0,0,2,60,60,140
+Style: Main,Noto Sans CJK JP,84,&H00FFFFFF,&H00000000,{dark_box},-1,0,3,0,0,2,60,60,140
+Style: Hook,Noto Sans CJK JP,90,{_ass_color(r, g, b)},&H99000000,{dark_box},-1,0,3,0,0,2,60,60,140
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -252,9 +252,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         tags = _ANIM_TAGS[anim_key] if (anim_key and anim_key in _ANIM_TAGS) \
                else _SHORTS_ANIMS[i % len(_SHORTS_ANIMS)]
 
-        # Split long narration into cues (max 2 lines x 16 chars) timed
-        # proportionally to character count so text keeps pace with the voice.
-        cue_groups  = _split_into_cues(seg["text"], max_chars=16, max_lines=2)
+        # Split long narration into cues. In the 1080px-wide vertical frame only
+        # ~10 full-width JP chars fit per line at these font sizes (margins 60+60
+        # leave 960px; 10×90 = 900px), so 16 chars/line overflowed the right edge.
+        cue_groups  = _split_into_cues(seg["text"], max_chars=10, max_lines=2)
         total_chars = sum(len(ln) for grp in cue_groups for ln in grp) or 1
         sub_cursor  = cursor
         for grp in cue_groups:

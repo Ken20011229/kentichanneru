@@ -82,6 +82,17 @@ def _wrap_px(draw: ImageDraw.ImageDraw, text: str, font, max_w: int) -> list[str
     return lines
 
 
+def _normalize_emphasis(text: str) -> str:
+    """Normalize highlight brackets so the LLM's 「」 intent is respected even when
+    it uses [ ] or full-width ［ ］ instead. Those become 「 」 so _split_highlights
+    picks the span up as an accent-colored highlight (【 】 is left untouched — it is
+    the hook-badge prefix handled separately)."""
+    if not text:
+        return text
+    return (text.replace("［", "「").replace("］", "」")
+                .replace("[", "「").replace("]", "」"))
+
+
 def _extract_hook(text: str) -> tuple[str | None, str]:
     """Split 【hook】 prefix from main title text."""
     if text.startswith("【"):
@@ -144,6 +155,55 @@ def _draw_mixed_line(draw: ImageDraw.ImageDraw, line: str, font,
                   stroke_width=stroke_width, stroke_fill=_TITLE_STROKE)
         bb = draw.textbbox((cx, y), seg_text, font=font)
         cx += bb[2] - bb[0]
+
+
+def _highlight_flags(text: str) -> list[bool]:
+    """Per-character mask: True when the char is inside a 「」 span (quotes
+    included). Computed on the *full* title so highlighting survives wrapping."""
+    flags = [False] * len(text)
+    i = 0
+    while i < len(text):
+        if text[i] == "「":
+            end = text.find("」", i + 1)
+            if end != -1:
+                for j in range(i, end + 1):
+                    flags[j] = True
+                i = end + 1
+                continue
+        i += 1
+    return flags
+
+
+def _draw_wrapped_highlighted(draw: ImageDraw.ImageDraw, full_text: str,
+                              lines: list[str], font, x: int, y0: int,
+                              base_color: tuple, accent: tuple, line_h: int,
+                              stroke_width: int = 5) -> None:
+    """Draw pre-wrapped `lines` (whose concatenation == full_text) applying the
+    accent color to 「」 spans even when a span straddles a line break."""
+    flags = _highlight_flags(full_text)
+    pos = 0
+    y = y0
+    for ln in lines:
+        lf = flags[pos:pos + len(ln)]
+        pos += len(ln)
+        cx = x
+        seg, cur = "", None
+        for ch, fl in zip(ln, lf):
+            if cur is None:
+                cur = fl
+            if fl != cur:
+                color = (*accent, 255) if cur else base_color
+                draw.text((cx, y), seg, font=font, fill=color,
+                          stroke_width=stroke_width, stroke_fill=_TITLE_STROKE)
+                cx += draw.textbbox((cx, y), seg, font=font)[2] - cx
+                seg, cur = ch, fl
+            else:
+                seg += ch
+        if seg:
+            color = (*accent, 255) if cur else base_color
+            draw.text((cx, y), seg, font=font, fill=color,
+                      stroke_width=stroke_width, stroke_fill=_TITLE_STROKE)
+        y += line_h
 
 
 def _draw_speech_bubble(canvas: Image.Image, text: str, font,
@@ -268,6 +328,7 @@ def generate_thumbnail(
     style: str | None = None,
 ) -> str:
     """Generate dark-style 1280×720 YouTube thumbnail with both characters."""
+    title_text = _normalize_emphasis(title_text)
     cfg      = config["thumbnail"]
     W, H     = cfg["width"], cfg["height"]
     fp       = cfg["font_path"]
@@ -396,10 +457,8 @@ def generate_thumbnail(
     _memlog(f"generate_thumbnail:SPLIT:after_font_loop lines={len(lines)}")
 
     lh = max((_th(draw, ln, font_title) for ln in lines), default=52) + 12
-    ty = TITLE_Y
-    for ln in lines:
-        _draw_mixed_line(draw, ln, font_title, TX, ty, _TITLE_YELLOW, accent, stroke_width=5)
-        ty += lh
+    _draw_wrapped_highlighted(draw, main_text, lines, font_title, TX, TITLE_Y,
+                              _TITLE_YELLOW, accent, lh, stroke_width=5)
     _memlog("generate_thumbnail:SPLIT:title_drawn")
 
     # ── 5. Speech bubble (reaction_text) ─────────────────────────
@@ -443,6 +502,7 @@ def generate_shorts_thumbnail(
     config: dict,
 ) -> str:
     """Generate 1080×1920 vertical Shorts thumbnail."""
+    title_text = _normalize_emphasis(title_text)
     cfg      = config["thumbnail"]
     fp       = cfg["font_path"]
     W, H     = 1080, 1920
@@ -567,9 +627,10 @@ def generate_shorts_thumbnail(
         draw.text((tx + hpx, ty + hpy), hook, font=font_hook, fill=(255, 255, 255))
         ty += hh + hpy * 2 + 16
 
-    for ln in lines:
-        draw.text((tx, ty), ln, font=font_title, fill=(20, 20, 20))
-        ty += lh
+    # Render 「」 spans in accent color so the emphasized keyword pops, even if
+    # the span wraps across lines.
+    _draw_wrapped_highlighted(draw, main_text, lines, font_title, tx, ty,
+                              (20, 20, 20), accent, lh, stroke_width=0)
 
     # ── Bottom accent stripe ──────────────────────────────────────
     draw.rectangle([(0, H - 8), (W, H)], fill=(*accent, 255))

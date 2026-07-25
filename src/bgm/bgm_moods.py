@@ -43,13 +43,16 @@ _BGM_MOOD: dict[str, str] = {
     "無敵完璧限界凸サイコな誰彼彼女.mp3":         "upbeat",
 }
 
-# If no BGM matches the target mood, fall back to these in order
+# Fallback order per target mood. The current library has no genuinely "tense"
+# or "tech" tracks, so energetic moods (news/tech/gaming/...) must reach for the
+# epic/upbeat/neutral tracks first and only use the sleepy calm/ambient tracks as
+# a genuine last resort — otherwise a news bulletin ends up over carefree music.
 _MOOD_FALLBACK: dict[str, list[str]] = {
     "upbeat":  ["upbeat", "epic", "neutral", "calm"],
-    "tense":   ["tense", "neutral", "calm"],
+    "tense":   ["tense", "epic", "neutral", "calm"],
     "epic":    ["epic", "upbeat", "neutral", "calm"],
-    "tech":    ["tech", "neutral", "calm"],
-    "neutral": ["neutral", "calm"],
+    "tech":    ["tech", "neutral", "epic", "calm"],
+    "neutral": ["neutral", "epic", "calm"],
     "calm":    ["calm", "neutral"],
 }
 
@@ -59,14 +62,24 @@ def mood_for_channel(channel_id: str) -> str:
 
 
 def filter_by_mood(bgm_files: list[str], mood: str) -> list[str]:
-    """Narrow bgm_files down to those matching mood, falling back to related
-    moods if nothing matches. Returns bgm_files unfiltered if nothing matches
-    even after fallback (e.g. untagged files)."""
-    for candidate_mood in _MOOD_FALLBACK.get(mood, [mood, "neutral", "calm"]):
-        matched = [
-            f for f in bgm_files
-            if _BGM_MOOD.get(os.path.basename(f)) == candidate_mood
-        ]
-        if matched:
-            return matched
-    return bgm_files
+    """Return the BGM candidates appropriate for ``mood``.
+
+    Candidates are accumulated across the mood's fallback tiers (so a channel is
+    not stuck on a single track for lack of an exact match), but for any non-calm
+    target mood the ``calm`` tier is only pulled in when nothing else matched at
+    all. That keeps energetic content (news, tech, gaming) off the sleepy ambient
+    tracks while still preferring the closest available mood.
+
+    Falls back to the full list if nothing is tagged."""
+    tiers = _MOOD_FALLBACK.get(mood, [mood, "neutral", "calm"])
+    pool: list[str] = []
+    seen: set[str] = set()
+    for candidate_mood in tiers:
+        # Don't dilute an energetic pool with calm tracks unless it's empty.
+        if candidate_mood == "calm" and mood != "calm" and pool:
+            continue
+        for f in bgm_files:
+            if _BGM_MOOD.get(os.path.basename(f)) == candidate_mood and f not in seen:
+                pool.append(f)
+                seen.add(f)
+    return pool or bgm_files

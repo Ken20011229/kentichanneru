@@ -47,14 +47,16 @@ def render_slide_clip(
     if content_path is not None:
         inputs += ["-loop", "1", "-t", f"{clip_dur:.3f}", "-i", content_path]
         D = max(1, int(clip_dur * fps))
-        zoom_rate = 0.04 / D
+        # Ken Burns zoom: 8% total travel (was 4%, which looked nearly static).
+        # Still gentle enough to avoid motion sickness / cheap-looking drift.
+        zoom_rate = 0.08 / D
         parts.append(
             f"[1:v]"
             f"scale={content_w}:{content_h}:force_original_aspect_ratio=increase,"
             f"crop={content_w}:{content_h},"
             f"fps={fps},"
             f"zoompan="
-            f"z='min(zoom+{zoom_rate:.6f},1.04)':"
+            f"z='min(zoom+{zoom_rate:.6f},1.08)':"
             f"x='(iw-iw/zoom)/2':"
             f"y='(ih-ih/zoom)/2':"
             f"d={D}:s={content_w}x{content_h}:fps={fps},"

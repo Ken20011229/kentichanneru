@@ -1,11 +1,58 @@
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from groq import Groq
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
+
+# ── Language / content sanity helpers ───────────────────────────────────────────
+# Hangul (Korean) plus a curated set of simplified-Chinese-only characters that
+# never appear in natural Japanese. Their presence means the LLM leaked another
+# language into the script (e.g. writing 「这」 instead of 「これ」), which reads as a
+# glaring defect on-screen. Each listed CJK char is a *simplified* form whose
+# Japanese equivalent is a different codepoint, so false positives are near zero.
+_HANGUL_RE = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")
+_CJK_FOREIGN = set(
+    "这么们说时过还现东车话问应该让见关开无优势结经网电脑术达边门间长对实样给变"
+    "头儿从众华协单卖买龙岁报亚严丽举习书图页领风飞马鸟鱼鸡鸣顾颜顺给织级红纯纸"
+)
+
+# Generic, content-free keywords that make poor center graphics — they say nothing
+# about the actual topic and look lazy when repeated across sections.
+_BANNED_KEYWORDS = {
+    "問題点", "生活", "影響", "変化", "新機能", "概要", "詳細", "まとめ",
+    "ポイント", "背景", "課題", "可能性", "結論", "理由", "原因", "目的",
+    "特徴", "解説", "内容", "情報", "話題", "注目", "今後", "現状", "重要",
+}
+
+
+def _find_foreign_chars(text: str) -> set:
+    """Return the set of non-Japanese (Chinese/Korean) characters found in text."""
+    if not text:
+        return set()
+    found = {ch for ch in text if ch in _CJK_FOREIGN}
+    m = _HANGUL_RE.search(text)
+    if m:
+        found.add(m.group())
+    return found
+
+
+def _clean_title(title: str) -> str:
+    """Strip a leading emphasis tag whose inner text is pure ASCII/Latin
+    (e.g. 【revolution】 or [buzz]) — those are LLM leaks, not real Japanese hooks.
+    Japanese-content tags (【判明】 etc.) and inline brand names (Google) are kept."""
+    if not title:
+        return title
+    m = re.match(r"^\s*[【\[［]([^】\]］]{1,20})[】\]］]\s*", title)
+    if m and re.fullmatch(r"[A-Za-z0-9 ._\-!?&]+", m.group(1) or ""):
+        stripped = title[m.end():].strip()
+        if stripped:
+            logger.warning(f"Stripped non-Japanese title tag: {m.group(0)!r}")
+            return stripped
+    return title
 
 _HINTS_FILE = "data/prompt_hints.json"
 _COMPETITOR_INSIGHTS_FILE = "data/competitor_insights.json"
@@ -95,6 +142,17 @@ SCRIPT_PROMPT = """\
 - 視聴者が誰かに話したくなる「驚きの一点」を含める
 - 最後は自然にまとめ＋チャンネル登録・高評価の呼びかけで締める
 
+## ★言語と文字の絶対ルール（違反すると動画が台無しになる）★
+- **すべて日本語で書く。** 簡体字・繁体字などの中国語の文字、ハングル、その他の外国語の文字を絶対に混ぜない。
+  - 例:「これ」を「这」、「説明」を「说明」、「時間」を「时间」などと書くのは厳禁。日本語の漢字・ひらがな・カタカナのみを使う。
+- タイトルや強調に【】を使う場合、中身は必ず日本語にする（例:【判明】【衝撃】【緊急】）。**【revolution】のように英単語だけを【】で囲むのは禁止。**
+- Google や Excel など、正式名称が英語の固有名詞はそのまま英語表記でよい。
+
+## ★keyword（画面中央のグラフィック）の絶対ルール★
+- 各セグメントの keyword は、その回の題材そのものを表す具体的な語にする（例: 複合グラフ / グラフの種類 / Excel互換 / データ可視化）。
+- 「問題点」「生活」「影響」「変化」「新機能」「概要」「詳細」「まとめ」「ポイント」「背景」「課題」「可能性」などの抽象的で内容の薄い語は禁止。
+- **全セグメントで keyword を重複させない。** 同じ語を2回以上使わない。ふさわしい語が無ければ空文字にする。
+
 ## 出力形式（JSON のみ、マークダウン不要）
 {{
   "title": "動画タイトル（30文字以内、クリックしたくなる表現。形式は自由）",
@@ -112,7 +170,7 @@ SCRIPT_PROMPT = """\
     ...
   ],
   "shorts_hook": "Shorts冒頭で使う1〜2文（一瞬で引きつける内容）",
-  "thumbnail_title": "サムネイル用テキスト（15文字以内、視覚的インパクト重視。キーワードは「」で囲むと黄色ハイライトで強調表示される。例:「単語」は存在しない）",
+  "thumbnail_title": "サムネイル用テキスト（15文字以内、視覚的インパクト重視。強調したい語は必ず「」（かぎ括弧）で囲むと黄色ハイライトで強調表示される。[ ] や 【 】ではなく必ず「」を使うこと。例:「複合グラフ」が超進化）",
   "reaction_text": "キャラクターの吹き出し反応文（8文字以内。例: えっ、マジ!? / それだけ!? / 嘘でしょ!）",
   "image_search_keywords": ["英語キーワード1", "英語キーワード2", "英語キーワード3", "英語キーワード4", "英語キーワード5"]
 }}
@@ -284,9 +342,28 @@ class ClaudeScriptWriter:
         for key in required:
             if key not in data:
                 raise ValueError(f"Script response missing required key: '{key}'")
+
+        # Strip leaked English-only emphasis tags from the title (e.g. 【revolution】)
+        data["title"] = _clean_title(data.get("title", ""))
+
         segments = data["script_segments"]
         if not segments:
             raise ValueError("script_segments is empty")
+
+        # Reject any non-Japanese (Chinese/Korean) character leaked into on-screen
+        # text. One stray simplified-Chinese char (e.g. 这) reads as a glaring
+        # defect, so fail here to trigger a full regeneration via @retry.
+        scan_targets = [data.get("title", ""), data.get("thumbnail_title", "")]
+        scan_targets += [s.get("text", "") for s in segments]
+        scan_targets += [s.get("text", "") for s in data.get("shorts_script_segments", [])]
+        foreign = set()
+        for t in scan_targets:
+            foreign |= _find_foreign_chars(t)
+        if foreign:
+            raise ValueError(
+                f"Non-Japanese characters detected in script (likely Chinese/Korean "
+                f"leak): {sorted(foreign)}. Regenerating in pure Japanese."
+            )
         if len(segments) < min_segments:
             raise ValueError(
                 f"Too few script_segments: {len(segments)} (minimum {min_segments} required for 5-7 min video)"
@@ -319,12 +396,19 @@ class ClaudeScriptWriter:
             "slide_up", "slide_down", "slide_left", "slide_right",
             "float_up", "snap",
         }
+        used_keywords: set[str] = set()
         for seg in segments:
             if "text" not in seg:
                 raise ValueError("script_segment missing 'text' field")
-            # Backfill visual metadata if LLM omitted them
-            if "keyword" not in seg:
-                seg["keyword"] = ""
+            # Keyword: drop content-free generic words and cross-section duplicates
+            # so the center graphic never repeats the same abstract term. Blanked
+            # keywords fall back to the neutral section graphic in slide_gen.
+            kw = (seg.get("keyword") or "").strip()
+            if kw and (kw in _BANNED_KEYWORDS or kw in used_keywords):
+                kw = ""
+            seg["keyword"] = kw
+            if kw:
+                used_keywords.add(kw)
             if "visual_type" not in seg or seg["visual_type"] not in valid_vtypes:
                 seg["visual_type"] = "detail"
             # Remove invalid animation_style so subtitle_gen uses its default
@@ -347,11 +431,17 @@ class ClaudeScriptWriter:
             logger.warning("shorts_script_segments missing — Shorts will use truncated main audio")
         else:
             _shorts_valid_vtypes = {"intro", "keyword", "point", "detail", "image"}
+            used_shorts_keywords: set[str] = set()
             for i, sseg in enumerate(shorts_segs):
                 if "text" not in sseg:
                     raise ValueError("shorts_script_segment missing 'text' field")
-                if "keyword" not in sseg:
-                    sseg["keyword"] = ""
+                # Same keyword hygiene as the main video (dedupe + drop generics)
+                skw = (sseg.get("keyword") or "").strip()
+                if skw and (skw in _BANNED_KEYWORDS or skw in used_shorts_keywords):
+                    skw = ""
+                sseg["keyword"] = skw
+                if skw:
+                    used_shorts_keywords.add(skw)
                 # Backfill visual_type
                 if sseg.get("visual_type") not in _shorts_valid_vtypes:
                     sseg["visual_type"] = "detail"
