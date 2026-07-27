@@ -28,9 +28,15 @@ _CHANNEL_MOOD: dict[str, str] = {
     "senior":       "calm",
 }
 
+# ⚠ 選曲プールから必ず除外するファイル。
+# `background.mp3` は max_volume/mean_volume ともに **-91.0 dB**（実測、ffmpeg
+# volumedetect）の完全な無音ファイル。これが "neutral" として正規メンバーに
+# 入っていたため、news/technology/science/education は 50%、全チャンネル平均で
+# 約32%の確率で「BGMが一切鳴らない動画」を出荷していた。
+_EXCLUDED_BGM: set[str] = {"background.mp3"}
+
 # BGM filename -> mood tag (heuristic, based on title/theme)
 _BGM_MOOD: dict[str, str] = {
-    "background.mp3":                          "neutral",
     "Hydrangea.mp3":                            "calm",
     "Lostwood_Reverie.mp3":                     "calm",
     "Oriental_Poppy.mp3":                       "calm",
@@ -61,6 +67,11 @@ def mood_for_channel(channel_id: str) -> str:
     return _CHANNEL_MOOD.get(channel_id, "neutral")
 
 
+def usable_tracks(bgm_files: list[str]) -> list[str]:
+    """無音・破損トラックを除いた実際に使える候補を返す。"""
+    return [f for f in bgm_files if os.path.basename(f) not in _EXCLUDED_BGM]
+
+
 def filter_by_mood(bgm_files: list[str], mood: str) -> list[str]:
     """Return the BGM candidates appropriate for ``mood``.
 
@@ -71,12 +82,16 @@ def filter_by_mood(bgm_files: list[str], mood: str) -> list[str]:
     tracks while still preferring the closest available mood.
 
     Falls back to the full list if nothing is tagged."""
+    bgm_files = usable_tracks(bgm_files)
     tiers = _MOOD_FALLBACK.get(mood, [mood, "neutral", "calm"])
     pool: list[str] = []
     seen: set[str] = set()
     for candidate_mood in tiers:
-        # Don't dilute an energetic pool with calm tracks unless it's empty.
-        if candidate_mood == "calm" and mood != "calm" and pool:
+        # Don't dilute an energetic pool with calm tracks unless the pool is still
+        # too small to give any variety. 無音トラックを除いた結果、非calmの
+        # mood は実曲が1〜2曲しか残らない。1曲に固定するくらいなら calm を
+        # 混ぜて多様性を確保したほうが、毎回同じ曲になるより害が小さい。
+        if candidate_mood == "calm" and mood != "calm" and len(pool) >= 3:
             continue
         for f in bgm_files:
             if _BGM_MOOD.get(os.path.basename(f)) == candidate_mood and f not in seen:

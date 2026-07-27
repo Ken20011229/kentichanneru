@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import random
+import re
 import shutil
 import tempfile
 import uuid
@@ -14,6 +15,7 @@ from src.channel_selector import get_active_channel
 from src.config_loader import load_config
 from src.deduplicator import Deduplicator
 from src.fetcher.aggregator import fetch_and_select_item
+from src.fetcher.article_extractor import fetch_article_body
 from src.images.fallback_generator import generate_fallback_images
 from src.images.pexels_client import PexelsClient
 from src.images.unsplash_client import UnsplashClient
@@ -27,16 +29,24 @@ from src.video.shorts_slide_gen import generate_shorts_slides
 from src.video.subtitle_gen import generate_ass, generate_shorts_ass
 from src.video.thumbnail_gen import generate_shorts_thumbnail, generate_thumbnail
 from src.video.thumbnail_style_selector import select_style
-from src.bgm.bgm_moods import mood_for_channel, filter_by_mood
+from src.bgm.bgm_moods import mood_for_channel, filter_by_mood, usable_tracks
 
 logger = logging.getLogger(__name__)
 
 
-def _pick_bgm(bgm_files: list, bgm_dir: str, mood: str = None) -> str:
+def _pick_bgm(bgm_files: list, bgm_dir: str, mood: str = None) -> str | None:
     """Pick BGM: narrow to channel-appropriate mood first, then prefer
-    top-ranked (by past CTR/retention) from strategy.json within that mood."""
+    top-ranked (by past CTR/retention) from strategy.json within that mood.
+
+    以前は候補が無いときのフォールバックが `background.mp3` だったが、これは
+    実測 -91 dB の無音ファイルで、返した時点で「BGMの無い動画」が確定する。
+    鳴らせる曲が1つも無いなら None を返し、呼び出し側で BGM 無しとして
+    正しく扱う（無音ファイルを混ぜても結果は同じで、ログ上だけ成功に見える）。
+    """
+    bgm_files = usable_tracks(bgm_files or [])
     if not bgm_files:
-        return os.path.join(bgm_dir, "background.mp3")
+        logger.warning("No usable BGM tracks found — rendering without BGM")
+        return None
 
     if mood:
         bgm_files = filter_by_mood(bgm_files, mood)
@@ -47,17 +57,138 @@ def _pick_bgm(bgm_files: list, bgm_dir: str, mood: str = None) -> str:
             with open(strategy_file, "r", encoding="utf-8") as f:
                 strategy = json.load(f)
             ranking = strategy.get("bgm_ranking", [])
-            # Top 3 get 3x weight, others get 1x
-            weights = []
-            names   = [os.path.basename(p) for p in bgm_files]
-            for name in names:
-                rank = ranking.index(name) if name in ranking else len(ranking)
-                weights.append(3.0 if rank < 3 else 1.0)
-            return random.choices(bgm_files, weights=weights, k=1)[0]
+            # ランキングは実測 n=1・43再生秒といった単発データから作られるため、
+            # 母数が揃うまで重み付けを効かせない（1本の偶然で1曲に3倍の重みが
+            # 付き、そのまま固定化される）。evolver が立てる学習ゲートに従う。
+            if strategy.get("learning_ready"):
+                weights = []
+                names   = [os.path.basename(p) for p in bgm_files]
+                for name in names:
+                    rank = ranking.index(name) if name in ranking else len(ranking)
+                    weights.append(3.0 if rank < 3 else 1.0)
+                return random.choices(bgm_files, weights=weights, k=1)[0]
         except Exception:
             pass
 
     return random.choice(bgm_files)
+
+
+def _realign_channel(config: dict, channel: dict, item: dict) -> dict:
+    """グローバルフォールバックで拾った記事に、ブランディングを合わせ直す。
+
+    チャンネル専用フィードが空だと `fetch_and_select_item` は全ソースから
+    選び直すが、そのままだと「映画情報」のバッジ・赤系アクセント・映画評論の
+    語り口で天気ニュースを読む動画になる（本番で発生）。記事のソース名から
+    実際に合うチャンネルへ寄せる。
+    """
+    if not item.get("from_global_fallback"):
+        return channel
+
+    source   = (item.get("source") or "").lower()
+    channels = config.get("channels", [])
+    for ch in channels:
+        for feed in ch.get("rss_feeds", []):
+            if feed.get("name", "").lower() and feed["name"].lower() in source:
+                if ch.get("id") != channel.get("id"):
+                    logger.warning(
+                        f"Channel realigned {channel.get('id')} -> {ch['id']} "
+                        f"(item came from '{item.get('source')}' via global fallback)"
+                    )
+                return ch
+    fallback = next((c for c in channels if c.get("id") == "news"), channel)
+    if fallback.get("id") != channel.get("id"):
+        logger.warning(
+            f"Channel realigned {channel.get('id')} -> {fallback.get('id')} "
+            f"(no channel matches source '{item.get('source')}')"
+        )
+    return fallback
+
+
+def _chapter_label(seg: dict) -> str:
+    """章題を作る。
+
+    keyword をそのまま使うと「気象庁」「関東」のような2〜3文字の名詞が並び、
+    「主要な場面」に出てもクリックする理由にならない。本文の1文目を短く
+    切り詰めて、何の話が始まるのか分かる見出しにする。
+    """
+    text  = (seg.get("text") or "").strip()
+    first = re.split(r"(?<=[。！？])", text)[0].strip() if text else ""
+    first = first.rstrip("。！？")
+    if len(first) >= 6:
+        return _smart_trim(first, 24)
+    return (seg.get("keyword") or "").strip()
+
+
+def _chapters(script_segments: list[dict], audio_segments: list[dict],
+              min_gap: float = 45.0) -> list[str]:
+    """YouTube のチャプター行を作る。
+
+    仕様上「00:00 で始まる」「3つ以上」「各チャプター10秒以上」が必要。
+    min_gap が 12 秒だと平均24.6秒のセグメントがほぼ全部チャプターになり、
+    5分の動画に13章が並んでいた（YouTube の推奨は5〜8章）。
+    """
+    lines, t, last_at = [], 0.0, -999.0
+    for seg, audio in zip(script_segments, audio_segments):
+        label = _chapter_label(seg)
+        if not lines:
+            label = label or "はじめに"
+        if label and (t - last_at) >= min_gap:
+            lines.append(f"{int(t // 60):02d}:{int(t % 60):02d} {label}")
+            last_at = t
+        t += audio.get("duration_sec", 0.0)
+    return lines if len(lines) >= 3 else []
+
+
+def _build_description(script_data: dict, item: dict, channel: dict,
+                       audio_segments: list[dict]) -> str:
+    """LLM の本文に、チャプター・出典・CTA・ハッシュタグを足して組み立てる。
+
+    以前は LLM が返した 400〜500 文字をそのまま送っていた（上限は5000文字）。
+    チャプターが無いと「主要な場面」が生成されず、離脱した視聴者が戻れない。
+    出典URLは aggregator が既に持っているのに捨てられていた。
+    """
+    blocks = [(script_data.get("description") or "").strip()]
+
+    chapters = _chapters(script_data.get("script_segments", []), audio_segments)
+    if chapters:
+        blocks.append("▼ チャプター\n" + "\n".join(chapters))
+
+    src_name = item.get("source", "")
+    src_url  = item.get("url", "")
+    if src_url:
+        blocks.append(f"▼ 出典\n{src_name}: {src_url}".strip())
+    elif src_name:
+        blocks.append(f"▼ 出典\n{src_name}")
+
+    blocks.append(
+        "※本動画は上記の報道・公開情報をもとに、AI音声（VOICEVOX）で再構成した解説です。"
+        "内容は投稿時点の情報に基づきます。"
+    )
+
+    tags = [t for t in script_data.get("tags", []) if t][:3]
+    if tags:
+        blocks.append(" ".join(f"#{t.replace(' ', '')}" for t in tags))
+
+    return "\n\n".join(b for b in blocks if b)[:4900]
+
+
+_TRIM_BREAKS = "、。！？「」『』（）・ "
+
+
+def _smart_trim(text: str, limit: int) -> str:
+    """語や括弧の途中で切らずに limit 文字以内へ縮める。"""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for i in range(len(cut) - 1, max(len(cut) - 8, 0), -1):
+        if cut[i] in _TRIM_BREAKS:
+            cut = cut[:i]
+            break
+    # 開いたままの括弧を落とす
+    for op, cl in (("「", "」"), ("『", "』"), ("（", "）")):
+        if cut.count(op) > cut.count(cl):
+            cut = cut[:cut.rfind(op)]
+    return cut.rstrip("、。・ ") or text[:limit]
 
 
 def _pick_deep_dive_topic(config: dict) -> tuple[dict, dict]:
@@ -182,37 +313,46 @@ def _run_shared_pipeline_stages(
         except Exception as e:
             logger.warning(f"Shorts TTS failed (will use truncated main audio): {e}")
 
-    # Stage 5: Generate/fetch 1 background image
+    # Stage 5: Fetch a *pool* of photos — background + per-segment visuals.
+    # 以前は total=1 で1枚しか取らず、5〜7分の全編がその1枚のぼかし背景のまま
+    # だった。中央のコンテンツ枠にも写真が1枚も入らず、全スライドが
+    # 「巨大な黒箱に2〜3文字」になっていた。config の images_per_video を使う。
     keywords = script_data.get("image_search_keywords", ["news"])
     image_dir = os.path.join(work_dir, "images")
     os.makedirs(image_dir, exist_ok=True)
-    image_paths = []
+    n_photos    = int(config["images"].get("images_per_video", 8))
+    photo_pool: list[str] = []
+    shorts_photo_pool: list[str] = []
 
-    hf_cfg = config["images"].get("huggingface", {})
-    if hf_cfg.get("enabled") and os.environ.get("HF_TOKEN"):
-        from src.images.huggingface_client import HuggingFaceImageClient
-        hf = HuggingFaceImageClient(os.environ["HF_TOKEN"])
-        image_paths = hf.fetch_images_for_keywords(keywords, image_dir, total=1)
+    pexels_cfg = config["images"].get("pexels", {})
+    if pexels_cfg.get("enabled") and os.environ.get("PEXELS_API_KEY"):
+        pexels = PexelsClient(os.environ["PEXELS_API_KEY"])
+        photo_pool = pexels.fetch_images_for_keywords(keywords, image_dir, total=n_photos)
+        try:
+            shorts_photo_pool = pexels.fetch_images_for_keywords(
+                keywords, image_dir, total=4, orientation="portrait"
+            )
+        except Exception as e:
+            logger.warning(f"Pexels portrait fetch failed: {e}")
 
-    if not image_paths:
-        pexels_cfg = config["images"].get("pexels", {})
-        if pexels_cfg.get("enabled") and os.environ.get("PEXELS_API_KEY"):
-            pexels = PexelsClient(os.environ["PEXELS_API_KEY"])
-            image_paths = pexels.fetch_images_for_keywords(keywords, image_dir, total=1)
-
-    if not image_paths:
+    if not photo_pool:
         unsplash_cfg = config["images"].get("unsplash", {})
         if unsplash_cfg.get("enabled") and os.environ.get("UNSPLASH_ACCESS_KEY"):
             unsplash = UnsplashClient(os.environ["UNSPLASH_ACCESS_KEY"])
-            image_paths = unsplash.fetch_images_for_keywords(keywords, image_dir, total=1)
+            photo_pool = unsplash.fetch_images_for_keywords(keywords, image_dir, total=n_photos)
 
-    if not image_paths:
+    if not photo_pool:
         logger.warning("No images from APIs, generating fallback gradient for thumbnail")
-        image_paths = generate_fallback_images(image_dir, 1)
+        photo_pool = generate_fallback_images(image_dir, 1)
 
-    bg_image_path = image_paths[0] if image_paths else None
+    image_paths   = photo_pool
+    bg_image_path = photo_pool[0] if photo_pool else None
+    logger.info(f"Photo pool: {len(photo_pool)} landscape / {len(shorts_photo_pool)} portrait")
 
     # Stage 5.5a: Per-segment AI images for "image" visual_type segments
+    # 背景・コンテンツ用の写真は Stage 5 の Pexels プールが担うようになったので、
+    # HuggingFace はここ（セグメント固有の生成画像）専用になった。
+    hf_cfg = config["images"].get("huggingface", {})
     segment_images: dict[int, str] = {}
     if hf_cfg.get("enabled") and os.environ.get("HF_TOKEN"):
         from src.images.huggingface_client import HuggingFaceImageClient
@@ -229,14 +369,20 @@ def _run_shared_pipeline_stages(
                 segment_images[idx] = result
                 logger.info(f"Segment {idx} image generated: {prompt[:60]}")
 
-    # Stage 5.5b: Generate static character overlay (never transitions in video)
-    from src.video.slide_gen import generate_slides, generate_character_overlay
-    char_overlay_path = os.path.join(work_dir, "char_overlay.png")
+    # Stage 5.5b: Character overlays — one per facial variant, switched over time.
+    # 差分アセット(zundamon1/2.png 等)は用意されていたのに使われておらず、
+    # キャラが全編まったく動かない静止画になっていた。
+    from src.video.slide_gen import build_character_timeline, generate_slides
+    char_dir = os.path.join(work_dir, "chars")
+    seg_durations = [s["duration_sec"] for s in audio_segments]
     try:
-        generate_character_overlay(config, char_overlay_path)
+        character_layers = build_character_timeline(
+            config, script_data["script_segments"], seg_durations, char_dir,
+            speaker_sides=[s.get("speaker_side") for s in audio_segments],
+        )
     except Exception as e:
         logger.warning(f"Character overlay generation failed (skipping): {e}")
-        char_overlay_path = None
+        character_layers = []
 
     # Stage 5.5c: Generate slides
     slide_dir = os.path.join(work_dir, "slides")
@@ -245,15 +391,18 @@ def _run_shared_pipeline_stages(
         {**seg, "segment_index": i}
         for i, seg in enumerate(script_data["script_segments"])
     ]
-    slide_plate_paths, slide_content_paths = generate_slides(
+    slide_plate_paths, slide_content_paths, per_slide_durations = generate_slides(
         segs_with_meta,
         title=script_data["title"],
         config=config,
         output_dir=slide_dir,
         bg_image_path=bg_image_path,
         segment_images=segment_images,
+        durations=seg_durations,
+        photo_pool=photo_pool,
     )
-    per_slide_durations = [s["duration_sec"] for s in audio_segments]
+    if not per_slide_durations:
+        per_slide_durations = seg_durations
 
     # Stage 6: Generate subtitles
     subtitle_path = os.path.join(work_dir, "subtitles", "subs.ass")
@@ -270,9 +419,9 @@ def _run_shared_pipeline_stages(
     render_video(
         slide_plate_paths, slide_content_paths,
         audio_segments, bgm_path, subtitle_path, video_path, config,
-        character_path=char_overlay_path,
         se_path=se_path,
         per_slide_durations=per_slide_durations,
+        character_layers=character_layers,
     )
 
     # Stage 8: Generate thumbnail
@@ -296,7 +445,19 @@ def _run_shared_pipeline_stages(
         logger.info("Stage 8b: composing shorts narration audio...")
         shorts_narration = os.path.join(shorts_dir, "shorts_narration.wav")
         compose_audio([s["audio_path"] for s in shorts_audio_segments], shorts_narration, ffmpeg_path)
-        shorts_dur = min(sum(s["duration_sec"] for s in shorts_audio_segments) + 0.3, 58.0)
+        # 58秒で機械的にぶった切ると文の途中で終わり、ループしたときに
+        # 気持ち悪い。セグメント境界で終わらせる。
+        acc, kept = 0.0, 0
+        for s in shorts_audio_segments:
+            if acc + s["duration_sec"] > 58.0:
+                break
+            acc += s["duration_sec"]
+            kept += 1
+        if kept == 0:
+            acc, kept = 58.0, len(shorts_audio_segments)
+        else:
+            shorts_audio_segments = shorts_audio_segments[:kept]
+        shorts_dur = min(acc + 0.3, 58.5)
         generate_shorts_ass(shorts_audio_segments, shorts_sub, channel=channel, max_dur=shorts_dur)
         shorts_audio_path = shorts_narration
 
@@ -326,8 +487,11 @@ def _run_shared_pipeline_stages(
             title=script_data["title"],
             config=config,
             output_dir=shorts_slide_dir,
-            bg_image_path=bg_image_path,
+            # 縦画面の下地に横長写真を敷くと大きく切り落とされるので、
+            # portrait で取った分があればそちらを使う
+            bg_image_path=(shorts_photo_pool or photo_pool or [None])[0],
             segment_images=shorts_segment_images,
+            photo_pool=shorts_photo_pool or photo_pool,
         )
         logger.info("Stage 8b: shorts slides done")
         per_shorts_durations = [s["duration_sec"] for s in shorts_audio_segments]
@@ -383,7 +547,7 @@ def _run_shared_pipeline_stages(
     uploader = YouTubeUploader(config)
     meta = {
         "title": script_data["title"],
-        "description": script_data["description"],
+        "description": _build_description(script_data, item, channel, audio_segments),
         "tags": script_data.get("tags", []),
         "category_id": channel.get("youtube_category_id"),
     }
@@ -391,16 +555,35 @@ def _run_shared_pipeline_stages(
 
     shorts_id = None
     if shorts_ok:
-        shorts_desc = f"▶ 本編はこちら → https://youtu.be/{video_id}\n\n" + script_data["description"]
+        hook = (script_data.get("shorts_hook") or "").strip()
+        shorts_desc = "\n\n".join(filter(None, [
+            f"▶ 本編（詳しい解説）→ https://youtu.be/{video_id}",
+            hook,
+            " ".join(f"#{t.replace(' ', '')}" for t in meta["tags"][:3]) + " #Shorts",
+        ]))
+        # 以前は title[:27] で機械的に切っていたため
+        # 「【衝撃】Amazonセール『Nintendo Swit #Shorts」のように
+        # 単語や鉤括弧の途中で切れていた。
+        shorts_title = script_data.get("shorts_title") or script_data["title"]
         shorts_meta = {
             **meta,
-            "title": script_data["title"][:27] + " #Shorts",
+            "title": _smart_trim(shorts_title, 27) + " #Shorts",
             "description": shorts_desc,
             "tags": meta["tags"] + ["Shorts", "YouTubeShorts"],
+            # 本編と同じ題材なので、Shorts では登録者に通知しない。
+            # 1回の実行で本編+Shortsの2通、1日2回で4通の通知が飛ぶと
+            # 登録解除の理由になる。
+            "notify_subscribers": False,
         }
         try:
             shorts_id = uploader.upload(shorts_path, shorts_thumb_path, shorts_meta)
             logger.info(f"Shorts uploaded: https://youtu.be/{shorts_id}")
+            # 本編→Shorts の導線を追加する。説明欄は本編アップロード時点では
+            # shorts_id が未確定なので、確定後に追記する（相互送客が片方向
+            # だと、Shortsで拾った視聴者しか本編に流れない）。
+            uploader.append_description(
+                video_id, f"▶ ショート版（60秒で要点だけ）→ https://youtu.be/{shorts_id}"
+            )
         except Exception as e:
             logger.warning(f"Shorts upload failed (main video still uploaded): {e}")
 
@@ -438,6 +621,11 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
 
         dedup.mark_seen(item["id"])
 
+        # Stage 1b: グローバルフォールバックで拾った場合、記事に合うチャンネルへ
+        # ブランディングを寄せ直す
+        channel = _realign_channel(config, channel, item)
+        config["active_channel"] = channel
+
         # Stage 2: Translate if needed
         if item.get("needs_translation"):
             translator = ClaudeTranslator(config["groq"])
@@ -451,6 +639,9 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
         script_data = None
         for _item_attempt in range(6):
             try:
+                # 台本の素材は要約(百数十字)ではなく記事本文から取る
+                if not item.get("body"):
+                    item["body"] = fetch_article_body(item.get("url", ""))
                 script_data = writer.generate(item, channel=channel)
                 break
             except Exception as e:
@@ -461,6 +652,8 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
                     raise RuntimeError("No more items available after script failures") from e
                 dedup.mark_seen(next_item["id"])
                 item = next_item
+                channel = _realign_channel(config, channel, item)
+                config["active_channel"] = channel
                 if item.get("needs_translation"):
                     translator = ClaudeTranslator(config["groq"])
                     translated = translator.translate_batch([item["title"], item["summary"]])

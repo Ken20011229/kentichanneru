@@ -109,23 +109,33 @@ def _fetch_global_items(config: dict) -> list[dict]:
 
 def fetch_and_select_item(config: dict, dedup, channel: dict = None) -> dict | None:
     all_items: list[dict] = []
+    from_global = False
 
     if channel:
         all_items = _fetch_channel_items(config, channel)
-        if not all_items:
-            logger.warning(f"No items from channel '{channel.get('id')}' sources — falling back to global")
 
-    if not all_items:
+    unseen = [i for i in all_items if not dedup.is_seen(i["id"])]
+    if not unseen:
+        if channel:
+            logger.warning(
+                f"No unseen items from channel '{channel.get('id')}' sources — "
+                f"falling back to global sources"
+            )
+            from_global = True
         all_items = _fetch_global_items(config)
+        unseen = [i for i in all_items if not dedup.is_seen(i["id"])]
 
     logger.info(f"Fetched {len(all_items)} total items from all sources")
 
-    unseen = [i for i in all_items if not dedup.is_seen(i["id"])]
     if not unseen:
         logger.info("All fetched items have already been processed")
         return None
 
     unseen.sort(key=lambda x: x.get("score", 0), reverse=True)
     selected = unseen[0]
+    # チャンネル専用フィードが空でグローバルに落ちたことを呼び出し側へ伝える。
+    # これを黙って通すと「映画チャンネルのバッジ・配色・語り口で天気ニュースを
+    # 読む」というジャンル不一致の動画が出来上がる（本番で実際に発生）。
+    selected["from_global_fallback"] = from_global
     logger.info(f"Selected item: '{selected['title']}' from {selected['source']}")
     return selected

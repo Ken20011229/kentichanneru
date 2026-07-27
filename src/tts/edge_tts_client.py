@@ -7,6 +7,8 @@ from pathlib import Path
 
 import edge_tts
 
+from src.tts.reading import to_speech
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,7 +43,8 @@ class EdgeTTSClient:
         for i, seg in enumerate(segments):
             out_path = os.path.join(output_dir, f"seg_{i:03d}.wav")
             logger.debug(f"Synthesizing segment {i}: {seg['text'][:40]}...")
-            self.synthesize(seg["text"], out_path)
+            # 音声だけ読み上げ用に正規化する（字幕は原文のまま）
+            self.synthesize(to_speech(seg["text"]), out_path)
             duration = self._get_wav_duration(out_path)
             results.append({**seg, "audio_path": out_path, "duration_sec": duration})
             logger.debug(f"  -> {duration:.2f}s")

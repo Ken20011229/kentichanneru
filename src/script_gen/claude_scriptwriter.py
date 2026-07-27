@@ -29,6 +29,52 @@ _BANNED_KEYWORDS = {
 }
 
 
+# 台本の接地チェックに使うパターン
+_PLACE_RE  = re.compile(r"(北海道|東京都|(?:京都|大阪)府|[一-龥]{2,3}県)")
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:mm|ミリ|km|キロ|度|℃|%|パーセント|人|名|億円|万円|円|回|件|年|か月|ヶ月|日間|時間|倍|台)")
+_FILLER_RE = re.compile(r"(ご視聴ありがとう|視聴ありがとう|よろしくお願いします|次の動画も)")
+_CTA_RE    = re.compile(r"(チャンネル登録|高評価)")
+
+
+def _segment_range(material_chars: int) -> tuple[int, int]:
+    """素材の分量から、要求する段落数の範囲を決める。
+
+    以前は素材の量に関係なく「最低12段落・合計2000文字以上」を固定で要求して
+    いた。RSS の要約は実測 104〜149 文字しかないため、約16倍の水増しを強制する
+    ことになり、モデルは捏造と同一文の反復でそれを埋めていた。
+    """
+    if material_chars >= 2000:
+        return 13, 16
+    if material_chars >= 900:
+        return 11, 14
+    if material_chars >= 400:
+        return 9, 12
+    return 8, 10
+
+
+def _sentences(text: str) -> list[str]:
+    return [s.strip() for s in re.split(r"(?<=[。！？])", text or "") if len(s.strip()) > 8]
+
+
+_NOUNISH_RE = re.compile(r"[一-龥ァ-ヶーA-Za-z0-9]{2,8}")
+
+
+def _keyword_from_text(text: str, used: set) -> str:
+    """段落本文から画面中央に出せる具体語を1つ拾う。
+
+    禁止語・既出語で keyword を空にすると、slide_gen が「巨大な黒箱に薄い数字と
+    セクション名」だけの情報量ゼロのパネルに落ちる。空にする前に本文から拾い直す。
+    """
+    candidates = [
+        w for w in _NOUNISH_RE.findall(text or "")
+        if 2 <= len(w) <= 8 and w not in _BANNED_KEYWORDS and w not in used
+    ]
+    if not candidates:
+        return ""
+    # 長い語ほど具体的な傾向があるので最長を採る
+    return max(candidates, key=len)
+
+
 def _find_foreign_chars(text: str) -> set:
     """Return the set of non-Japanese (Chinese/Korean) characters found in text."""
     if not text:
@@ -70,6 +116,9 @@ def _load_hints(channel_id: str = None) -> str:
                 lines.append("## 過去の実績から学んだ改善点（必ず反映）")
                 for note in h["style_notes"]:
                     lines.append(f"- {note}")
+            # 再生数が一桁の動画のタイトルを「高再生数の例」として注入すると、
+            # ノイズを鉄板パターンとして学習してしまう（実測: 15再生 vs 9再生
+            # の差から【衝撃】【判明】【革命】を"勝ちパターン"にしていた）。
             if h.get("top_titles_by_view"):
                 lines.append("## 高再生数タイトル例（このスタイルを参考に）")
                 for t in h["top_titles_by_view"][:5]:
@@ -78,9 +127,10 @@ def _load_hints(channel_id: str = None) -> str:
                 lines.append("## 高視聴維持率タイトル例（内容の深さを参考に）")
                 for t in h["top_titles_by_retention"][:3]:
                     lines.append(f"- {t}")
+            # CTR=0% を毎回申告するのは無意味かつ有害（Analytics が未取得でも0になる）
             ctr = h.get("global_ctr_pct", 0)
             ret = h.get("global_retention_sec", 0)
-            if ctr or ret:
+            if ctr and ctr > 0.5:
                 lines.append(f"## 現在のチャンネル平均指標: CTR={ctr}% / 平均視聴時間={ret}秒")
         except Exception:
             pass
@@ -94,8 +144,15 @@ def _load_hints(channel_id: str = None) -> str:
                 lines.append("## 同ジャンルで今伸びている他チャンネルのタイトル例（参考にする、コピーはしない）")
                 for t in genre.get("top_titles", [])[:5]:
                     lines.append(f"- {t}")
-                if genre.get("top_bracket_patterns"):
-                    lines.append(f"よく使われる【】パターン: {'、'.join(genre['top_bracket_patterns'])}")
+                # 他局の番組ブランド名や実在人物名（「スーパーJチャンネル」
+                # 「神谷宗幣VS辻元清美」など）が【】パターンとして混ざるため、
+                # 一般的な短い感情語だけを残す
+                patterns = [
+                    p for p in genre.get("top_bracket_patterns", [])
+                    if len(p) <= 5 and not re.search(r"[A-Za-z]{3,}|公式|チャンネル|VS|vs|番組", p)
+                ]
+                if patterns:
+                    lines.append(f"よく使われる【】パターン: {'、'.join(patterns)}")
         except Exception:
             pass
 
@@ -117,6 +174,9 @@ _RESEARCH_PROMPT = """\
    - 社会・生活への影響
    - 今後の展望
 
+重要: **確実に知っている事実だけを書く。** 年号・数値・人名が不確かな場合は書かない。
+推測を事実として書くくらいなら、その項目を省略する。
+
 最初の1行目に「テーマ:【抽出した教育的テーマ名】」と書き、その後にレポートを500〜700文字で書く。マークダウン不要。テキストのみ。
 """
 
@@ -126,8 +186,15 @@ SCRIPT_PROMPT = """\
 
 ## 今回のニュース
 タイトル: {title}
-概要: {summary}
+本文: {summary}
 ソース: {source}
+
+## ★事実の絶対ルール（最優先。違反したら作り直し）★
+- **上の「本文」に書かれていない固有名詞（地名・人名・企業名・施設名）、数値、日付、被害状況を新しく作らない。**
+- 本文に無い一般知識を書くときは「一般的には」「過去の例では」と明示し、**今回の出来事として断定しない。**
+- 尺が足りないときに事実を増やして埋めるのは禁止。同じ事実の「意味・背景・視聴者への影響」を掘り下げて長さを作る。
+- 同じ文・同じ言い回しを別の段落で繰り返さない（言い換えての再掲も不可）。
+- 媒体名（NHK NEWS など）や「続きを読む」といった配信上の文字列をナレーションに入れない。
 
 ## まず考えてから書く
 このニュースを動画にするとき、どんな切り口が最も面白いか・驚きがあるかを考えてください。
@@ -137,10 +204,16 @@ SCRIPT_PROMPT = """\
 
 ## 品質基準（形式の縛りはないが、これだけは守る）
 - 最初の1〜2文で視聴者を引き込む（疑問・驚き・共感のどれかで）
-- 具体的な数字・固有名詞・事実を必ず入れる
-- 「〜かもしれません」「〜と思われます」などの曖昧表現は使わない
+- 本文にある具体的な数字・固有名詞・事実を必ず入れる
+- タイトルと冒頭は断定的に書く（本編中で本文に無い推測を断定するのは禁止）
 - 視聴者が誰かに話したくなる「驚きの一点」を含める
 - 最後は自然にまとめ＋チャンネル登録・高評価の呼びかけで締める
+
+## ナレーション文体（AI音声で読み上げます）
+- 同じ語尾（〜です／〜ます／〜ています／〜ですね）を3文以上続けない。体言止め・問いかけを混ぜる。
+- 同じ主語（例:「山梨県では」）で始まる文を隣り合う段落で繰り返さない。
+- 1文は45文字以内。読点は句の切れ目にだけ置く。
+- アルファベットの略語を使うときは初出でカタカナ読みを併記する（例: HTML（エイチティーエムエル））。
 
 ## ★言語と文字の絶対ルール（違反すると動画が台無しになる）★
 - **すべて日本語で書く。** 簡体字・繁体字などの中国語の文字、ハングル、その他の外国語の文字を絶対に混ぜない。
@@ -170,15 +243,17 @@ SCRIPT_PROMPT = """\
     ...
   ],
   "shorts_hook": "Shorts冒頭で使う1〜2文（一瞬で引きつける内容）",
-  "thumbnail_title": "サムネイル用テキスト（15文字以内、視覚的インパクト重視。強調したい語は必ず「」（かぎ括弧）で囲むと黄色ハイライトで強調表示される。[ ] や 【 】ではなく必ず「」を使うこと。例:「複合グラフ」が超進化）",
+  "shorts_title": "Shorts用タイトル（20文字以内。本編とは別の切り口で、単語の途中で切れない自然な日本語）",
+  "thumbnail_title": "サムネイル用テキスト（8〜15文字。必ず数字か固有名詞を1つ含める。強調したい語は必ず「」（かぎ括弧）で囲むとアクセント色でハイライトされる。[ ] や 【 】ではなく必ず「」を使うこと。例:「5日連続」で過去最長 / 「40度」超えの猛暑）",
   "reaction_text": "キャラクターの吹き出し反応文（8文字以内。例: えっ、マジ!? / それだけ!? / 嘘でしょ!）",
   "image_search_keywords": ["英語キーワード1", "英語キーワード2", "英語キーワード3", "英語キーワード4", "英語キーワード5"]
 }}
 
-## ★ 厳守：動画5〜7分 ★ セグメントは最低12個、各150〜200文字
-- セグメント数: **最低12段落、目安14〜16段落**
-- 各 `text`: **4〜6文、150〜200文字**（短いと動画が1分未満になる。150文字未満は絶対NG）
-- 合計2000文字以上のナレーションが必要
+## ★ 尺の指定 ★
+- セグメント数: **{min_segments}〜{max_segments}段落**（この範囲を外れるのは不可。多すぎても作り直し）
+- **1段落目（フック）だけは 1〜2文・50〜70文字と短くする。** ここが長いと冒頭で離脱される
+- **2段落目以降の各 `text`: 3〜5文、120〜170文字**（120文字未満は不可）
+- 素材が薄いときに段落を水増しして埋めるより、範囲の下限で密度を保つほうがよい
 
 ## 映像レイアウト（4レイヤー独立）
 キャラ（固定）/ 記事画像（中央アニメ）/ テキスト（字幕アニメ）/ 背景 は独立して動く。
@@ -189,20 +264,28 @@ SCRIPT_PROMPT = """\
 - 具体的な数字・比較・意外な切り口を必ず含める
 - 「あなたの生活にも影響する」視点を1箇所入れる
 
-## 推奨構成（14〜16段落目安）
-つかみ(1)→概要(2)→背景・歴史(2)→詳細A(2)→詳細B(2)→データ(2)→影響(2)→見解(1)→展望(1)→まとめCTA(1)
+## 構成（段落ごとに必ず「役割」を持たせる）
+段落数は上の指定に従うので、役割は**全体に対する位置**で決めること。
+- **最初の1段落（フック）**: 結論の一部だけを提示し「なぜそうなるのか」は伏せる（オープンループ）。50〜70文字と短く
+- **次の1段落（約束）**: この動画で分かることを3点宣言する（「3つ目が一番意外です」のように引きを作る）
+- **前半（全体の 20〜45% 付近）**: 前提と経緯。各段落の最後は次の段落への疑問で終える
+- **★中盤の山（全体の 45〜65% 付近）★**: 最大の驚き（本文にある数字）をここに置き、冒頭のオープンループを回収する
+- **後半（65〜90% 付近）**: 影響・比較・視聴者の生活との接続
+- **終盤（90% 付近）**: 展望（新しい問いを1つ残す）
+- **最終段落**: まとめ＋チャンネル登録・高評価のCTA。**CTAの後ろに段落を足さない**
 
 ## script_segments の規則
-- 最低12段落（目安14〜16段落）。各textは4〜6文・150〜200文字
+- 1段落目は50〜70文字、2段落目以降は3〜5文・120〜170文字
 - 横動画は Shorts より深く掘り下げること
-- tags は12〜15個（「{channel_name}」「ずんだもん」「VOICEVOX」を含める）
+- tags は12〜15個（「{channel_name}」を含める。1個30文字以内）
 
 ## shorts_script_segments について（縦画面 9:16 専用）
 - Shorts だけで完結する独立した動画として構成する（合計 55 秒以内）
 - セグメント数は**最低7文**（目安 9〜12 文）。必ず7文以上にすること
-- 最後のセグメントは必ず「チャンネル登録と高評価をお願いします！」で締める
+- **最初のセグメントは `shorts_hook` と同じ内容にする。タイトルをそのまま読ませない。**
 - 各テキストは**20文字以内**に抑える（縦画面で2行以内に収まるよう短く）
-- 最初の1〜2文で視聴者を絶対に引き込む（スワイプされないフック）
+- **末尾にチャンネル登録のお願いを入れない。** Shorts はループ再生で維持率が決まるので、
+  最後の1文は最初の1文に自然につながる内容にしてループさせる（CTAは説明欄で行う）
 
 ## Shorts visual_type の選び方（縦画面向けレイアウト）
 | 値 | 縦画面での見え方 | 使うタイミング |
@@ -263,16 +346,24 @@ class ClaudeScriptWriter:
         self.client = Groq(api_key=os.environ.get("GROQ_API_KEY") or config.get("groq_api_key", ""))
         self.model = config.get("groq_model", "llama-3.3-70b-versatile")
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=4, max=30))
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=4, max=30))
     def generate(self, item: dict, channel: dict = None) -> dict:
         ch    = channel or {}
         hints = _load_hints(channel_id=ch.get("id"))
+
+        # 素材は本文を優先。要約しか無い記事に長尺を要求すると、埋めるために
+        # 元記事に無い事実を創作する。素材の量に応じて段落数の要求を変える。
+        material = (item.get("body") or "").strip() or item.get("summary", "")
+        min_segments, max_segments = _segment_range(len(material))
+
         prompt = SCRIPT_PROMPT.format(
             channel_name=ch.get("name", "ニュース"),
             script_style=ch.get("script_style", "ニュースキャスター。客観的・正確・簡潔に伝える。"),
             title=item.get("title", ""),
-            summary=item.get("summary", ""),
+            summary=material,
             source=item.get("source", ""),
+            min_segments=min_segments,
+            max_segments=max_segments,
         )
         if hints:
             prompt += f"\n\n{hints}"
@@ -282,6 +373,12 @@ class ClaudeScriptWriter:
             response_format={"type": "json_object"},
         )
         raw = response.choices[0].message.content.strip()
+        usage = getattr(response, "usage", None)
+        if usage:
+            logger.info(
+                f"Groq tokens: prompt={usage.prompt_tokens} "
+                f"completion={usage.completion_tokens} total={usage.total_tokens}"
+            )
 
         try:
             data = json.loads(raw)
@@ -289,7 +386,8 @@ class ClaudeScriptWriter:
             logger.error(f"Script JSON parse failed: {e}\nRaw:\n{raw[:500]}")
             raise
 
-        self._validate(data)
+        self._validate(data, min_segments=min_segments, max_segments=max_segments,
+                       source_text=f"{item.get('title', '')}\n{material}")
         return data
 
     def _research_topic(self, original_title: str) -> str:
@@ -321,9 +419,10 @@ class ClaudeScriptWriter:
             body_start = 1
         research_body = "\n".join(lines[body_start:]).strip()
 
-        # Keep summary ≤ 300 chars so total prompt stays within the range
-        # where the model reliably produces 65+ segments.
-        summary_excerpt = research_body[:300]
+        # 文の途中で切らない（機械的な [:300] だと語中で切れて意味が壊れる）
+        summary_excerpt = research_body[:600]
+        if "。" in summary_excerpt:
+            summary_excerpt = summary_excerpt.rsplit("。", 1)[0] + "。"
 
         item = {
             "title": extracted_theme,
@@ -337,7 +436,8 @@ class ClaudeScriptWriter:
         logger.info(f"Deep-dive extracted theme: {extracted_theme}")
         return self.generate(item, channel=channel)
 
-    def _validate(self, data: dict, min_segments: int = 12):
+    def _validate(self, data: dict, min_segments: int = 12,
+                  max_segments: int | None = None, source_text: str = ""):
         required = ["title", "description", "tags", "script_segments", "thumbnail_title", "image_search_keywords"]
         for key in required:
             if key not in data:
@@ -366,29 +466,128 @@ class ClaudeScriptWriter:
             )
         if len(segments) < min_segments:
             raise ValueError(
-                f"Too few script_segments: {len(segments)} (minimum {min_segments} required for 5-7 min video)"
+                f"Too few script_segments: {len(segments)} (minimum {min_segments} required)"
             )
-        if len(segments) < 14:
-            logger.warning(f"script_segments below target: {len(segments)} (target 14-16 for 5-7 min video)")
-        # Each segment must be a paragraph (150+ chars) — short segments make < 2 min videos
+        if max_segments and len(segments) > max_segments:
+            logger.warning(
+                f"script_segments above range: {len(segments)} > {max_segments} — trimming"
+            )
+            del segments[max_segments:]
+
         texts = [seg.get("text", "") for seg in segments]
+        # ⚠ 1段落目(フック)は文字数判定から外す。
+        # 「フックは1〜2文・60文字程度」とプロンプトで指示しているのに、
+        # バリデータが全段落に150字以上を要求していたため、モデルは冒頭にも
+        # 145字前後を書かざるを得なかった。実測の第1セグメントは約24.5秒あり、
+        # 「最初の5秒で核心を言い切る」という自前のヒントと真逆の動画に
+        # なっていた（平均視聴率の実測は26.7〜52.6%）。
+        hook_text  = texts[0] if texts else ""
+        body_texts = texts[1:] if len(texts) > 1 else texts
         total_chars = sum(len(t) for t in texts)
-        avg_chars = total_chars / max(len(texts), 1)
-        short_segs = sum(1 for t in texts if len(t) < 120)
-        if avg_chars < 120:
+        avg_chars   = sum(len(t) for t in body_texts) / max(len(body_texts), 1)
+        short_segs  = sum(1 for t in body_texts if len(t) < 100)
+        if len(hook_text) > 110:
+            logger.warning(
+                f"Hook segment is {len(hook_text)} chars (~{len(hook_text)/6.1:.0f}s) — "
+                f"viewers decide within the first few seconds; 50-70 chars is the target"
+            )
+        if avg_chars < 115:
             raise ValueError(
                 f"Average segment too short: {avg_chars:.1f} chars "
-                f"(need avg 150+ chars per segment — each segment must be 4-6 sentences, 150-200 chars)"
+                f"(segments after the hook must be 3-5 sentences, 120-170 chars)"
             )
-        if short_segs > len(segments) * 0.3:
-            logger.warning(
-                f"{short_segs}/{len(segments)} segments are under 120 chars — "
-                f"video may be shorter than 5 minutes. Retrying..."
-            )
+        if short_segs > max(1, len(body_texts) * 0.15):
             raise ValueError(
-                f"Too many short segments: {short_segs}/{len(segments)} under 120 chars. "
-                f"Each segment must be 150-200 chars (4-6 sentences)."
+                f"Too many short segments: {short_segs}/{len(body_texts)} under 100 chars. "
+                f"Segments after the hook must be 120-170 chars (3-5 sentences)."
             )
+
+        # ── 反復チェック ─────────────────────────────────────────────────
+        # 本番動画では同じ文が3回流れ、5分20秒のうち約50秒が実質再放送だった。
+        all_sents = [s for t in texts for s in _sentences(t)]
+        if all_sents:
+            uniq_ratio = len(set(all_sents)) / len(all_sents)
+            if uniq_ratio < 0.85:
+                raise ValueError(
+                    f"Repetitive script: only {uniq_ratio:.0%} of sentences are unique "
+                    f"({len(all_sents) - len(set(all_sents))} duplicated). Rewrite without repeating."
+                )
+
+        # ── CTA の後ろに中身のない段落を積んでいないか ────────────────────
+        cta_at = next((i for i, t in enumerate(texts) if _CTA_RE.search(t)), None)
+        if cta_at is not None and cta_at < len(texts) - 1:
+            trailing = texts[cta_at + 1:]
+            if any(_FILLER_RE.search(t) or len(t) < 60 for t in trailing):
+                raise ValueError(
+                    "Filler segments after the CTA — the CTA must be the last segment."
+                )
+
+        # ── 接地チェック（元記事に無い固有名詞・数値を作っていないか）───────
+        if source_text:
+            body = "".join(texts)
+            src_places = set(_PLACE_RE.findall(source_text))
+            leaked = {p for p in _PLACE_RE.findall(body) if p not in src_places}
+            if leaked:
+                raise ValueError(
+                    f"Hallucinated place names not present in the source article: "
+                    f"{sorted(leaked)}. Rewrite using only facts from the article."
+                )
+            src_nums = set(_NUMBER_RE.findall(source_text))
+            new_nums = [n for n in _NUMBER_RE.findall(body) if n not in src_nums]
+            if len(new_nums) >= 4:
+                raise ValueError(
+                    f"Too many invented figures not present in the source article: "
+                    f"{new_nums[:6]}. Use only figures from the article."
+                )
+
+        # ── タイトルと本編の整合 ────────────────────────────────────────
+        # タイトルが約束したことを本編で回収していないと、サムネの答えが動画内に
+        # 無い状態になる（本番では「酷暑日」のタイトルで後半3分が別ニュースだった）。
+        core = re.sub(r"[【\[［].*?[】\]］]", "", data.get("title", ""))
+        key_terms = [w for w in re.findall(r"[一-龥ァ-ヶA-Za-z0-9]{2,}", core)]
+        whole = "".join(texts)
+        if key_terms and not any(k in whole for k in key_terms):
+            raise ValueError(
+                f"Title '{data['title']}' does not appear anywhere in the script — "
+                f"the video must deliver what the title promises."
+            )
+        if key_terms and not any(k in "".join(texts[:5]) for k in key_terms):
+            logger.warning(
+                f"Title '{data['title']}' is not addressed in the first 5 segments — "
+                f"viewers may leave before the payoff"
+            )
+
+        # ── サムネイル文言（体裁なので再生成せず自動補正）──────────────
+        tt = (data.get("thumbnail_title") or "").strip()
+        tt_len = len(re.sub(r"[「」\[\]［］]", "", tt))
+        if not (6 <= tt_len <= 16):
+            fixed = _clean_title(data.get("title", ""))
+            fixed = re.sub(r"[【\[［].*?[】\]］]", "", fixed).strip()[:16]
+            logger.warning(
+                f"thumbnail_title was {tt_len} chars ({tt!r}) — a 3-character thumbnail "
+                f"gives no reason to click; falling back to {fixed!r}"
+            )
+            data["thumbnail_title"] = fixed or tt
+
+        # ── タグ（体裁なので自動補正）──────────────────────────────────
+        tags = [str(t).strip()[:30] for t in data.get("tags", []) if str(t).strip()]
+        seen_tags, kept, total_len = set(), [], 0
+        for t in tags:
+            if t in seen_tags or total_len + len(t) + 1 > 480:
+                continue
+            seen_tags.add(t)
+            kept.append(t)
+            total_len += len(t) + 1
+        for kw in (s.get("keyword") for s in segments):
+            if len(kept) >= 8:
+                break
+            kw = (kw or "").strip()[:30]
+            if kw and kw not in seen_tags:
+                seen_tags.add(kw)
+                kept.append(kw)
+        if len(kept) < 4:
+            logger.warning(f"Only {len(kept)} usable tags after cleanup")
+        data["tags"] = kept
         valid_vtypes = {"intro", "point", "keyword", "detail", "image"}
         valid_anims  = {
             "fade", "scale_in", "scale_intro", "pop", "bounce",
@@ -405,7 +604,9 @@ class ClaudeScriptWriter:
             # keywords fall back to the neutral section graphic in slide_gen.
             kw = (seg.get("keyword") or "").strip()
             if kw and (kw in _BANNED_KEYWORDS or kw in used_keywords):
-                kw = ""
+                # 空文字にするだけだと slide_gen が情報量ゼロのセクション板に
+                # 落ちる。本文から具体語を拾い直す。
+                kw = _keyword_from_text(seg.get("text", ""), used_keywords)
             seg["keyword"] = kw
             if kw:
                 used_keywords.add(kw)
@@ -421,9 +622,12 @@ class ClaudeScriptWriter:
         segments[0]["visual_type"] = "intro"
 
         total_chars = sum(len(t) for t in texts)
+        # 実測の読み上げ速度は 5.9〜6.6 文字/秒（VOICEVOX speed 1.1）。以前は
+        # 9 文字/秒で計算していたため、実際は5.3分の台本を「3.5分」と出力し、
+        # 「まだ短い」という誤った圧力をかけ続けていた。
         logger.info(
             f"Script: {len(segments)} segments, total {total_chars} chars, "
-            f"avg {avg_chars:.0f} chars/seg, est. {total_chars/9/60:.1f} min"
+            f"avg {avg_chars:.0f} chars/seg, est. {total_chars/6.1/60:.1f} min"
         )
 
         shorts_segs = data.get("shorts_script_segments", [])
@@ -438,7 +642,7 @@ class ClaudeScriptWriter:
                 # Same keyword hygiene as the main video (dedupe + drop generics)
                 skw = (sseg.get("keyword") or "").strip()
                 if skw and (skw in _BANNED_KEYWORDS or skw in used_shorts_keywords):
-                    skw = ""
+                    skw = _keyword_from_text(sseg.get("text", ""), used_shorts_keywords)
                 sseg["keyword"] = skw
                 if skw:
                     used_shorts_keywords.add(skw)
@@ -454,6 +658,21 @@ class ClaudeScriptWriter:
             # Force first shorts segment to intro
             if shorts_segs:
                 shorts_segs[0]["visual_type"] = "intro"
+                # 第1セグメントがタイトルの読み上げになっていたら shorts_hook で
+                # 置き換える。Shorts は最初の1秒でスワイプされる。
+                hook = (data.get("shorts_hook") or "").strip()
+                first = (shorts_segs[0].get("text") or "").strip()
+                title_core = re.sub(r"[【\[［].*?[】\]］]", "", data.get("title", "")).strip()
+                if hook and title_core and title_core[:10] and title_core[:10] in first:
+                    logger.info("Shorts opener was the title — replacing with shorts_hook")
+                    shorts_segs[0]["text"] = hook
+            # 末尾の定型CTAは Shorts のループを断ち切るので落とす（説明欄で行う）
+            while len(shorts_segs) > 5 and (
+                _CTA_RE.search(shorts_segs[-1].get("text", ""))
+                or _FILLER_RE.search(shorts_segs[-1].get("text", ""))
+            ):
+                dropped = shorts_segs.pop()
+                logger.info(f"Dropped trailing Shorts CTA segment: {dropped.get('text','')[:30]}")
             if len(shorts_segs) < 5:
                 raise ValueError(
                     f"shorts_script_segments too short: {len(shorts_segs)} segments "

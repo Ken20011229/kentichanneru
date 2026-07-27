@@ -5,6 +5,9 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from src.images.safe_open import safe_open_rgba
+# 折り返しの禁則判定は字幕と同じものを使う（熟語・数字＋助数詞・漢数字の
+# 位取りを行またぎで割らないための共通ルール）
+from src.video.subtitle_gen import _splits_word
 
 try:
     import resource
@@ -68,17 +71,49 @@ def _th(draw: ImageDraw.ImageDraw, text: str, font) -> int:
     return bb[3] - bb[1]
 
 
+# 行頭に置いてはいけない文字 / 行末に置いてはいけない文字（サムネイル用）
+_TH_NO_LINE_START = "、。，．）」』】〉》!?！？ー〜…・:;：；%％"
+_TH_NO_LINE_END   = "（「『【〈《"
+
+
 def _wrap_px(draw: ImageDraw.ImageDraw, text: str, font, max_w: int) -> list[str]:
+    """max_w に収まるよう折り返す。日本語の禁則処理つき。
+
+    禁則が無かったため、実生成したサムネイルで「5日連 / 続」「過 / 去最長」の
+    ような熟語分断や、閉じ括弧「」」が行頭に来る割れ方が出ていた。
+    """
     lines, cur = [], ""
-    for ch in text:
+    for i, ch in enumerate(text):
         test = cur + ch
         if _tw(draw, test, font) > max_w and cur:
+            # 行末禁則: 開き括弧で終わるなら、その1文字を次行へ送る
+            if cur[-1] in _TH_NO_LINE_END and len(cur) > 1:
+                lines.append(cur[:-1])
+                cur = cur[-1] + ch
+                continue
+            # 行頭禁則: 次行の先頭に来る文字が禁則なら、この行に押し込む
+            if ch in _TH_NO_LINE_START:
+                cur = test
+                continue
+            # 語中分断を避けて数文字だけ戻す（「観測史 / 上2番目」→
+            # 「観測 / 史上2番目」）。判定は字幕側と同じものを使う。
+            back = 0
+            while back < 3 and len(cur) - back > 2 and _splits_word(text, i - back):
+                back += 1
+            if 0 < back < len(cur) - 1:
+                lines.append(cur[:-back])
+                cur = cur[-back:] + ch
+                continue
             lines.append(cur)
             cur = ch
         else:
             cur = test
     if cur:
         lines.append(cur)
+    # 孤児行（最終行が1文字）を解消する
+    if len(lines) >= 2 and len(lines[-1]) == 1 and len(lines[-2]) >= 4:
+        lines[-1] = lines[-2][-1] + lines[-1]
+        lines[-2] = lines[-2][:-1]
     return lines
 
 
@@ -102,6 +137,9 @@ def _extract_hook(text: str) -> tuple[str | None, str]:
     return None, text
 
 
+_LAST_EPISODE: dict[str, int] = {}
+
+
 def _get_and_increment_episode(channel_id: str) -> int:
     """Read, increment, and persist episode count for the given channel."""
     state_path = Path("data/episode_counts.json")
@@ -117,7 +155,55 @@ def _get_and_increment_episode(channel_id: str) -> int:
     state_path.parent.mkdir(parents=True, exist_ok=True)
     with open(state_path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+    _LAST_EPISODE[channel_id] = count
     return count
+
+
+def _peek_episode(channel_id: str) -> int:
+    """同じ回の本編で発行済みの話数を、増やさずに読む。
+
+    Shorts は以前 `channel_id + '_shorts'` という別カウンタを使っていたため、
+    同じ動画なのに本編が「第10回」、Shortsが「第2回」と食い違っていた。
+    Shorts から本編に来た視聴者にはシリーズが別物に見える。
+    """
+    if channel_id in _LAST_EPISODE:
+        return _LAST_EPISODE[channel_id]
+    state_path = Path("data/episode_counts.json")
+    if state_path.exists():
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                return max(1, json.load(f).get(channel_id, 1))
+        except Exception:
+            pass
+    return 1
+
+
+def _fit_centered(draw, text: str, fp: str, max_w: int, top: int, bottom: int,
+                  sizes: tuple, max_lines: int) -> tuple:
+    """テキストを最大サイズで折り返し、縦方向の中央に置く。
+
+    以前はどのスタイルも上詰めで描いていたため、短いサムネ文言だと下半分が
+    まるごと空白になっていた（実測: 1280×720 のうち文字は左上の約470×160px
+    だけで、右〜下の6割が真っ黒）。
+
+    Returns: (font, lines, line_height, start_y)
+    """
+    font, lines = None, None
+    for size in sizes:
+        ft = _font(fp, size)
+        cand = _wrap_px(draw, text, ft, max_w)
+        lh   = max((_th(draw, ln, ft) for ln in cand), default=size) + int(size * 0.22)
+        if len(cand) <= max_lines and lh * len(cand) <= (bottom - top):
+            font, lines = ft, cand
+            break
+    if font is None:
+        font = _font(fp, sizes[-1])
+        lines = _wrap_px(draw, text, font, max_w)[:max_lines]
+
+    lh    = max((_th(draw, ln, font) for ln in lines), default=44) + int(font.size * 0.22)
+    total = lh * len(lines)
+    start = top + max(0, (bottom - top - total) // 2)
+    return font, lines, lh, start
 
 
 def _split_highlights(text: str) -> list[tuple[str, bool]]:
@@ -443,21 +529,13 @@ def generate_thumbnail(
 
     # Auto-size title font
     _memlog("generate_thumbnail:SPLIT:before_font_loop")
-    for size in (114, 96, 80, 66, 54, 44):
-        ft    = _font(fp, size)
-        lines = _wrap_px(draw, main_text, ft, MAX_TW)
-        max_lh = max((_th(draw, ln, ft) for ln in lines), default=size)
-        lh     = max_lh + 12
-        if len(lines) <= 3 and TITLE_Y + lh * len(lines) <= H - 60:
-            font_title = ft
-            break
-    else:
-        font_title = _font(fp, 44)
-        lines = _wrap_px(draw, main_text, font_title, MAX_TW)
+    font_title, lines, lh, title_top = _fit_centered(
+        draw, main_text, fp, MAX_TW, TITLE_Y, H - 60,
+        (156, 138, 120, 104, 88, 74, 60, 48), max_lines=3,
+    )
     _memlog(f"generate_thumbnail:SPLIT:after_font_loop lines={len(lines)}")
 
-    lh = max((_th(draw, ln, font_title) for ln in lines), default=52) + 12
-    _draw_wrapped_highlighted(draw, main_text, lines, font_title, TX, TITLE_Y,
+    _draw_wrapped_highlighted(draw, main_text, lines, font_title, TX, title_top,
                               _TITLE_YELLOW, accent, lh, stroke_width=5)
     _memlog("generate_thumbnail:SPLIT:title_drawn")
 
@@ -549,7 +627,9 @@ def generate_shorts_thumbnail(
 
     # ── Top-left episode badge + channel name ────────────────────
     BX, BY = 30, 34
-    ep_label_s = f"第{_get_and_increment_episode(channel_id + '_shorts')}回"
+    # 本編と同じ話数を使う（別カウンタだと同じ動画で「第10回」と「第2回」が
+    # 併存し、Shorts→本編の回遊でシリーズが別物に見える）
+    ep_label_s = f"第{_peek_episode(channel_id)}回"
     font_ep_s  = _font(fp, 40)
     ep_w_s     = _tw(draw, ep_label_s, font_ep_s)
     ep_h_s     = _th(draw, ep_label_s, font_ep_s)
@@ -739,7 +819,9 @@ def _render_impact(*, bg_image_path: str, title_text: str, reaction_text: str,
                    episode_label: str, channel_name: str,
                    right_path: str, left_path: str) -> Image.Image:
     """Giant text spans full width, characters smaller in bottom-right corner."""
-    canvas = _bg_from_photo(bg_image_path, W, H, blur=10, overlay_alpha=210)
+    # overlay_alpha 210 だと背景写真がほぼ黒く潰れ、何が写っているか分からない
+    # 「暗い板」になっていた。写真として認識できる程度に残す。
+    canvas = _bg_from_photo(bg_image_path, W, H, blur=6, overlay_alpha=155)
     if canvas is None:
         canvas = _make_dark_bg(W, H, accent)
     # Bokeh on top
@@ -750,7 +832,7 @@ def _render_impact(*, bg_image_path: str, title_text: str, reaction_text: str,
              (int(W * rx) + r, int(H * ry) + r)], fill=color)
         canvas = Image.alpha_composite(canvas, blob.filter(ImageFilter.GaussianBlur(r // 1.4)))
 
-    canvas, _ = _paste_chars_small(canvas, right_path, left_path, W, H, 0.62, 0.50)
+    canvas, char_inner_x = _paste_chars_small(canvas, right_path, left_path, W, H, 0.62, 0.50)
 
     draw = ImageDraw.Draw(canvas)
 
@@ -770,22 +852,26 @@ def _render_impact(*, bg_image_path: str, title_text: str, reaction_text: str,
         draw.text((TX + 14, TITLE_Y + 6), hook, font=font_hook, fill=(255, 255, 255))
         TITLE_Y += hh + 24
 
-    for size in (150, 130, 110, 92, 78, 64):
-        ft = _font(fp, size)
-        lines = _wrap_px(draw, main_text, ft, MAX_TW)
-        lh = max((_th(draw, ln, ft) for ln in lines), default=size) + 8
-        if len(lines) <= 4 and TITLE_Y + lh * len(lines) <= H - 40:
-            font_title = ft
-            break
-    else:
-        font_title = _font(fp, 64)
-        lines = _wrap_px(draw, main_text, font_title, MAX_TW)
+    font_title, lines, lh, ty = _fit_centered(
+        draw, main_text, fp, MAX_TW, TITLE_Y, H - 40,
+        (200, 176, 152, 132, 112, 94, 78, 64), max_lines=4,
+    )
+    # ⚠ 行単位で _draw_mixed_line を呼ぶと、「」が行をまたいだ瞬間に
+    # `find("」")` が -1 を返してハイライトが丸ごと失われる（実測: CARD/NEON で
+    # 「5日連続」が一切色付かなかった）。行をまたいでも効く実装を使う。
+    _draw_wrapped_highlighted(draw, main_text, lines, font_title, TX, ty,
+                              (255, 255, 255), accent, lh, stroke_width=10)
 
-    lh = max((_th(draw, ln, font_title) for ln in lines), default=60) + 8
-    ty = TITLE_Y
-    for ln in lines:
-        _draw_mixed_line(draw, ln, font_title, TX, ty, (255, 255, 255), accent, stroke_width=10)
-        ty += lh
+    # Speech bubble — 他の4スタイルは描いているのに IMPACT だけ reaction_text を
+    # 引数で受け取ったまま一度も使っておらず、5本に1本のサムネから LLM に
+    # 書かせたリアクションが黙って消えていた。
+    if reaction_text and reaction_text.strip():
+        font_bub = _font(fp, 30)
+        tmp_d = ImageDraw.Draw(canvas)
+        bub_w = _tw(tmp_d, reaction_text.strip(), font_bub) + 40
+        bub_x = max(char_inner_x, W - bub_w - 20)
+        canvas = _draw_speech_bubble(canvas, reaction_text.strip(), font_bub, bub_x, 26, accent)
+        draw = ImageDraw.Draw(canvas)
 
     draw.rectangle([(0, H - 6), (W, H)], fill=(*accent, 255))
     return canvas
@@ -845,27 +931,20 @@ def _render_neon(*, bg_image_path: str, title_text: str, reaction_text: str,
         draw.text((TX + 14, TITLE_Y + 6), hook, font=font_hook, fill=(255, 255, 255))
         TITLE_Y += hh + 22
 
-    for size in (110, 94, 80, 66, 54, 44):
-        ft = _font(fp, size)
-        lines = _wrap_px(draw, main_text, ft, MAX_TW)
-        lh = max((_th(draw, ln, ft) for ln in lines), default=size) + 12
-        if len(lines) <= 3 and TITLE_Y + lh * len(lines) <= H - 60:
-            font_title = ft
-            break
-    else:
-        font_title = _font(fp, 44)
-        lines = _wrap_px(draw, main_text, font_title, MAX_TW)
-
-    lh = max((_th(draw, ln, font_title) for ln in lines), default=52) + 12
-    ty = TITLE_Y
+    font_title, lines, lh, ty = _fit_centered(
+        draw, main_text, fp, MAX_TW, TITLE_Y, H - 60,
+        (150, 132, 114, 96, 80, 66, 54, 44), max_lines=3,
+    )
+    # グローは行ごとに、文字は行をまたぐハイライト対応の実装でまとめて描く
+    glow_y = ty
     for ln in lines:
-        # Glow blob under each line
         glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ImageDraw.Draw(glow).text((TX, ty), ln, font=font_title, fill=(*accent, 200))
+        ImageDraw.Draw(glow).text((TX, glow_y), ln, font=font_title, fill=(*accent, 200))
         canvas = Image.alpha_composite(canvas, glow.filter(ImageFilter.GaussianBlur(14)))
-        draw = ImageDraw.Draw(canvas)
-        _draw_mixed_line(draw, ln, font_title, TX, ty, (255, 255, 255), accent, stroke_width=3)
-        ty += lh
+        glow_y += lh
+    draw = ImageDraw.Draw(canvas)
+    _draw_wrapped_highlighted(draw, main_text, lines, font_title, TX, ty,
+                              (255, 255, 255), accent, lh, stroke_width=3)
 
     # Speech bubble
     if reaction_text and reaction_text.strip():
@@ -943,22 +1022,12 @@ def _render_card(*, bg_image_path: str, title_text: str, reaction_text: str,
         draw.text((TX + 12, TITLE_Y + 5), hook, font=font_hook, fill=(255, 255, 255))
         TITLE_Y += hh + 22
 
-    for size in (88, 74, 62, 52, 44, 36):
-        ft = _font(fp, size)
-        lines = _wrap_px(draw, main_text, ft, MAX_TW)
-        lh = max((_th(draw, ln, ft) for ln in lines), default=size) + 10
-        if len(lines) <= 4 and TITLE_Y + lh * len(lines) <= CARD_B - 24:
-            font_title = ft
-            break
-    else:
-        font_title = _font(fp, 36)
-        lines = _wrap_px(draw, main_text, font_title, MAX_TW)
-
-    lh = max((_th(draw, ln, font_title) for ln in lines), default=44) + 10
-    ty = TITLE_Y
-    for ln in lines:
-        _draw_mixed_line(draw, ln, font_title, TX, ty, _DARK_TEXT, accent, stroke_width=0)
-        ty += lh
+    font_title, lines, lh, ty = _fit_centered(
+        draw, main_text, fp, MAX_TW, TITLE_Y, CARD_B - 24,
+        (128, 112, 96, 82, 70, 58, 48, 40), max_lines=4,
+    )
+    _draw_wrapped_highlighted(draw, main_text, lines, font_title, TX, ty,
+                              _DARK_TEXT, accent, lh, stroke_width=0)
 
     # Speech bubble
     if reaction_text and reaction_text.strip():
@@ -1044,10 +1113,8 @@ def _render_band(*, bg_image_path: str, title_text: str, reaction_text: str,
             draw.text((TX + 14, hy), hook, font=font_hook, fill=(255, 255, 255))
 
     lh_actual = max((_th(draw, ln, font_title) for ln in lines), default=52) + 14
-    ty = TITLE_Y
-    for ln in lines:
-        _draw_mixed_line(draw, ln, font_title, TX, ty, (255, 255, 255), accent, stroke_width=5)
-        ty += lh_actual
+    _draw_wrapped_highlighted(draw, main_text, lines, font_title, TX, TITLE_Y,
+                              (255, 255, 255), accent, lh_actual, stroke_width=5)
     _memlog("render_band:title_drawn")
 
     # Speech bubble

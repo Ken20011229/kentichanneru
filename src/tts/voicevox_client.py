@@ -6,6 +6,8 @@ from pathlib import Path
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from src.tts.reading import to_speech
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,7 +83,8 @@ class VoicevoxClient:
 
             out_path = os.path.join(output_dir, f"seg_{i:03d}.wav")
             logger.debug(f"Synthesizing segment {i} [{speaker_side} speaker={sid}]: {seg['text'][:40]}...")
-            self.synthesize(seg["text"], out_path, speaker_id=sid)
+            # 音声だけ読み上げ用に正規化する。seg["text"] は字幕用に原文のまま残す。
+            self.synthesize(to_speech(seg["text"]), out_path, speaker_id=sid)
             duration = self._get_wav_duration(out_path)
             results.append({**seg, "audio_path": out_path, "duration_sec": duration,
                             "speaker_side": speaker_side})

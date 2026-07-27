@@ -1,9 +1,11 @@
 import logging
+import math
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
+from src.video.composer import _LOUDNORM
 from src.video.shorts_slide_gen import CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H
 from src.video.slide_render import render_slide_clip, merge_clips_sequential
 
@@ -82,6 +84,7 @@ def render_shorts(
             ffmpeg, plate_paths[i], content_path, clip_dur, fps,
             VW, VH, CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H,
             clip_out,
+            pan_right=(i % 2 == 0),
         )
         clip_paths.append(clip_out)
 
@@ -96,63 +99,83 @@ def render_shorts(
     # ── Final composite — narration + bgm mix ──────────────────────────────────
     # character overlayは既にplateに焼き込み済みのため、videoの合成は
     # trimのみ。入力は video 1本 + narration + bgm の3本のみでn非依存。
+    # 字幕ディレクトリを cwd にして1回で焼き込むため、入力は絶対パスで渡す
     inputs = [
-        "-i", slideshow_path,
-        "-t", str(max_duration), "-i", audio_path,
-        "-i", bgm_path,
+        "-i", os.path.abspath(slideshow_path),
+        "-t", str(max_duration), "-i", os.path.abspath(audio_path),
     ]
-    parts = [f"[0:v]trim=duration={max_duration:.3f},setpts=PTS-STARTPTS[trimmed_v]"]
+    if bgm_path:
+        inputs += ["-i", os.path.abspath(bgm_path)]
+    parts = [
+        f"[0:v]trim=duration={max_duration:.3f},setpts=PTS-STARTPTS,"
+        f"{{VF}}[trimmed_v]"
+    ]
 
-    parts.append(
-        f"[2:a]aloop=loop=-1:size=2e9,"
-        f"atrim=duration={max_duration:.3f},"
-        f"volume={bgm_vol},"
-        f"afade=t=in:st=0:d=1,"
-        f"afade=t=out:st={max_duration - 2:.3f}:d=2[bgm_out]"
+    narration  = "[1:a]"
+    mix_inputs = [narration]
+    if bgm_path:
+        parts.append("[1:a]asplit=2[narr_mix][narr_sc]")
+        narration = "[narr_mix]"
+        mix_inputs = [narration]
+        # ⚠ 末尾の afade=t=out を入れてはいけない。Shorts はループ再生され、
+        # ループ点で音が消えるとそこが離脱ポイントになる（CTAを外して
+        # 「最後の1文が最初につながる」構成にした意図が消える）。
+        # BGMは本編と同じくトラック単位で正規化してから相対音量を決める。
+        bgm_lufs = -28.0 + 20 * math.log10(max(float(bgm_vol), 0.001) / 0.09)
+        parts.append(
+            f"[2:a]aloop=loop=-1:size=2e9,"
+            f"atrim=duration={max_duration:.3f},"
+            f"loudnorm=I={bgm_lufs:.1f}:TP=-8:LRA=11,"
+            f"afade=t=in:st=0:d=0.8[bgm_norm]"
+        )
+        parts.append(
+            f"[bgm_norm][narr_sc]"
+            f"sidechaincompress=threshold=0.03:ratio=6:attack=20:release=300[bgm_out]"
+        )
+        mix_inputs.append("[bgm_out]")
+
+    # 本編と同じく -14 LUFS に正規化する(実測 -24.7 LUFS で、Shorts のフィードでは
+    # 音量差がそのままスワイプ理由になる)
+    if len(mix_inputs) > 1:
+        parts.append(
+            "".join(mix_inputs)
+            + f"amix=inputs={len(mix_inputs)}:duration=first:dropout_transition=1:"
+              f"normalize=0,{_LOUDNORM}[audio_out]"
+        )
+    else:
+        parts.append(f"{narration}{_LOUDNORM}[audio_out]")
+
+    # 最下部のラインは Shorts のUI帯に完全に隠れるため描かない。アクセントは
+    # plate 側（上端とコンテンツ下辺）で表現する。
+    # 合成と字幕焼き込みを1回のエンコードにまとめる（以前は2回エンコードして
+    # いて世代劣化していた）。
+    #
+    # ⚠ 末尾のフェードアウトも入れない。ループ再生の継ぎ目が黒画面になる。
+    # 代わりに先頭だけ 0.15 秒フェードインさせて、ループの折り返しを滑らかにする。
+    sub_dir = os.path.dirname(subtitle_path)
+    vf = (
+        f"ass={os.path.basename(subtitle_path)}:fontsdir=fonts,"
+        f"fade=t=in:st=0:d=0.15"
     )
-    parts.append(
-        f"[1:a][bgm_out]"
-        f"amix=inputs=2:duration=first:dropout_transition=1:normalize=0[audio_out]"
-    )
+    filter_complex = ";".join(parts).replace("{VF}", vf)
 
-    filter_complex = ";".join(parts)
-
-    raw_shorts = output_path.replace(".mp4", "_raw.mp4")
-    cmd_pass1 = (
+    cmd = (
         [ffmpeg, "-y"]
         + inputs
         + [
             "-filter_complex", filter_complex,
             "-map", "[trimmed_v]",
             "-map", "[audio_out]",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "128k",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-g", str(fps * 3), "-keyint_min", str(fps),
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
             "-movflags", "+faststart",
-            raw_shorts,
+            os.path.abspath(output_path),
         ]
     )
-    _run(cmd_pass1, "Shorts pass1")
+    _run(cmd, "Shorts render", cwd=sub_dir)
     shutil.rmtree(clips_dir, ignore_errors=True)
-
-    # Pass2: subtitles
-    sub_dir   = os.path.dirname(subtitle_path)
-    ch_accent = config.get("active_channel", {}).get("accent_color", [50, 200, 80])
-    accent_hex = "{:02X}{:02X}{:02X}".format(*ch_accent[:3])
-    vf = f"drawbox=x=0:y=ih-8:w=iw:h=8:color=0x{accent_hex}:t=fill,ass=subs_shorts.ass:fontsdir=fonts"
-    cmd_pass2 = [
-        ffmpeg, "-y", "-i", raw_shorts,
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        output_path,
-    ]
-    _run(cmd_pass2, "Shorts pass2", cwd=sub_dir)
-
-    try:
-        os.unlink(raw_shorts)
-    except Exception:
-        pass
 
     logger.info(f"Shorts rendered: {output_path}")
     return output_path

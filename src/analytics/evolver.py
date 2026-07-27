@@ -49,6 +49,24 @@ def run(log_file: str = "data/video_log.json"):
         logger.info(f"Need {_MIN_VIDEOS}+ videos with stats. Got {len(with_stats)}.")
         return
 
+    # ⚠ サンプル数ゲート: 再生数が一桁の動画どうしの差（15再生 vs 9再生）から
+    # 「鉄板パターン」を抽出して重みやプロンプトに反映すると、ノイズを学習して
+    # 増幅するだけになる。母数が揃うまでは探索モード（全て等重み）を維持する。
+    # prompt_hints だけでなく channel_weights / bgm_ranking にも同じゲートを
+    # 掛ける（片方だけ塞いでも、乱数の偏りがそのまま固定化される）。
+    _MIN_VIDEOS_FOR_LEARNING = 20
+    _MIN_VIEWS_FOR_LEARNING  = 50
+    max_views = max((r.get("views", 0) for r in with_stats), default=0)
+    learning_ready = (
+        len(with_stats) >= _MIN_VIDEOS_FOR_LEARNING and max_views >= _MIN_VIEWS_FOR_LEARNING
+    )
+    if not learning_ready:
+        logger.info(
+            f"Learning gated: {len(with_stats)} videos / max {max_views} views "
+            f"(need {_MIN_VIDEOS_FOR_LEARNING} / {_MIN_VIEWS_FOR_LEARNING}) — "
+            f"staying in exploration mode (equal weights, no prompt hints)"
+        )
+
     # ── Channel weights (by views) ────────────────────────────────
     ch_views = defaultdict(list)
     ch_ctr   = defaultdict(list)
@@ -63,10 +81,16 @@ def run(log_file: str = "data/video_log.json"):
 
     avg_views  = {ch: _avg(v) for ch, v in ch_views.items()}
     global_avg = _avg([v for vs in ch_views.values() for v in vs]) or 1.0
-    channel_weights = {
-        ch: round(min(2.0, max(0.2, avg / global_avg)), 3)
-        for ch, avg in avg_views.items()
-    }
+    # 母数が揃うまでは全チャンネル等重み。実データでは technology が「1本が
+    # 0再生」というだけで weight 0.2（gaming 1.8 の1/9）まで落ちており、
+    # n=1 の偶然がジャンル選定を半永久的に固定していた。
+    if learning_ready:
+        channel_weights = {
+            ch: round(min(2.0, max(0.2, avg / global_avg)), 3)
+            for ch, avg in avg_views.items()
+        }
+    else:
+        channel_weights = {ch: 1.0 for ch in avg_views}
 
     # ── Thumbnail style weights (by CTR) ─────────────────────────
     from src.video.thumbnail_style_selector import STYLES
@@ -77,8 +101,6 @@ def run(log_file: str = "data/video_log.json"):
             style_ctr[st].append(r["ctr"])
 
     thumbnail_style_weights: dict = {}
-    global_ctr_baseline = global_ctr if "global_ctr" in dir() else 0.04
-    # We'll fill this properly after computing global_ctr below
 
     # ── BGM ranking (by avg view duration = retention proxy) ──────
     bgm_ret  = defaultdict(list)
@@ -151,6 +173,9 @@ def run(log_file: str = "data/video_log.json"):
         "updated_at":           datetime.now(timezone.utc).isoformat(),
         "videos_analyzed":      len(with_stats),
         "analytics_available":  len(with_analytics),
+        # 消費側（_pick_bgm / channel_selector）が「この重みを信じてよいか」を
+        # 判断するためのフラグ。False の間は探索モードとして等重みで扱う。
+        "learning_ready":       learning_ready,
         "channel_weights":      channel_weights,
         "avg_views_per_channel": {ch: round(_avg(v)) for ch, v in ch_views.items()},
         "avg_ctr_per_channel":  {ch: round(_avg(v)*100, 2) for ch, v in ch_ctr.items()},
@@ -169,10 +194,17 @@ def run(log_file: str = "data/video_log.json"):
 
     # ── Write prompt_hints.json (for script prompt evolution) ─────
     top10 = sorted(with_stats, key=lambda r: r.get("views", 0), reverse=True)[:10]
-    top_titles = [r.get("title", "") for r in top10 if r.get("title")]
+    # 再生数が閾値未満のタイトルを「高再生数の例」として渡さない
+    top_titles = [
+        r.get("title", "") for r in top10
+        if r.get("title") and r.get("views", 0) >= _MIN_VIEWS_FOR_LEARNING
+    ]
 
-    # High-retention videos (top 30% by avg_view_duration)
-    retention_sorted = sorted(with_analytics, key=lambda r: r.get("avg_view_duration_sec", 0), reverse=True)
+    # 維持率は「秒」ではなく「割合」で見る。動画尺が60秒→320秒に変わったのに
+    # 絶対秒の閾値(45s/80s/150s)のまま判定していて、意味を失っていた。
+    retention_sorted = sorted(
+        with_analytics, key=lambda r: r.get("avg_view_percentage", 0), reverse=True
+    )
     top_ret_titles = [r.get("title", "") for r in retention_sorted[:5] if r.get("title")]
 
     # ── Title pattern analysis ────────────────────────────────────
@@ -196,25 +228,19 @@ def run(log_file: str = "data/video_log.json"):
         elif global_ctr > 0.07:
             style_notes.append("CTRが高い(> 7%)。現在のタイトルスタイルは非常に効果的 — 維持する")
 
-    if global_ret > 0:
-        if global_ret < 45:
-            style_notes.append("視聴維持率が非常に低い(< 45s)。最初の5秒で核心的事実を言い切る。前置き禁止")
-            style_notes.append("動画の冒頭15秒でサムネイルの答えを出す（「釣り」は離脱を招く）")
-        elif global_ret < 80:
-            style_notes.append("視聴維持率を改善(< 80s)。中盤に新情報・驚きを追加し視聴者を引き留める")
-        elif global_ret > 150:
-            style_notes.append("視聴維持率が優秀(> 150s)。現在のスクリプト構成は効果的 — 維持する")
-
-    # avg_view_percentage insight
+    # 維持率は割合で判定する（動画尺が可変なので絶対秒では比較にならない）
     all_pcts = [r["avg_view_percentage"] for r in with_analytics if r.get("avg_view_percentage")]
     global_pct = _avg(all_pcts)
     if global_pct > 0:
         if global_pct < 30:
-            style_notes.append(f"平均視聴率が低い({global_pct:.0f}%)。動画の後半に情報を追加し離脱防止を強化する")
-        elif global_pct > 60:
-            style_notes.append(f"平均視聴率が高い({global_pct:.0f}%)。現在の構成は最後まで見られている — 維持する")
+            style_notes.append(f"平均視聴率が非常に低い({global_pct:.0f}%)。最初の5秒で核心を言い切る。前置き禁止")
+            style_notes.append("動画の冒頭15秒でサムネイルの答えを出す（「釣り」は離脱を招く）")
+        elif global_pct < 45:
+            style_notes.append(f"平均視聴率が低い({global_pct:.0f}%)。中盤に新情報・驚きを置いて引き留める")
+        elif global_pct > 55:
+            style_notes.append(f"平均視聴率が高い({global_pct:.0f}%)。現在の構成は効果的 — 維持する")
 
-    if top_brackets:
+    if top_brackets and learning_ready:
         style_notes.append(f"高再生数タイトルの鉄板パターン: 【{'】【'.join(top_brackets[:3])}】")
 
     # Thumbnail style learning notes
@@ -245,12 +271,14 @@ def run(log_file: str = "data/video_log.json"):
 
     hints = {
         "updated_at":           datetime.now(timezone.utc).isoformat(),
-        "top_titles_by_view":   top_titles,
-        "top_titles_by_retention": top_ret_titles,
-        "top_bracket_patterns": top_brackets,
+        "learning_ready":       learning_ready,
+        "top_titles_by_view":   top_titles if learning_ready else [],
+        "top_titles_by_retention": top_ret_titles if learning_ready else [],
+        "top_bracket_patterns": top_brackets if learning_ready else [],
         "style_notes":          style_notes,
         "global_ctr_pct":       round(global_ctr * 100, 2),
         "global_retention_sec": round(global_ret),
+        "global_avg_view_percentage": round(global_pct, 1),
     }
     with open(_PROMPT_HINTS_FILE, "w", encoding="utf-8") as f:
         json.dump(hints, f, ensure_ascii=False, indent=2)

@@ -78,7 +78,10 @@ images:
     per_page: 15
   huggingface:
     enabled: true
-  images_per_video: 8
+  # 13セグメント × 最大8カット を賄う枚数。8枚だと同じ写真が6〜7回再登場し、
+  # 隣接セグメントでも重複していた（Pexels無料枠は200req/h、5キーワード×5枚で
+  # 10リクエスト程度なので余裕がある）。
+  images_per_video: 24
 
 video:
   resolution: "1920x1080"
@@ -86,7 +89,10 @@ video:
   display_duration_sec: 5
   bgm_volume: 0.09
   xfade_duration: 0.5
-  se_volume: 0.5
+  # 音量は最終ミックスで loudnorm=I=-14 に正規化される（composer.py）。
+  # ここの値はナレーション:BGM:SE の相対バランスを決める。
+  # SE の音量は下の `se.volume` を参照する（かつて video.se_volume という
+  # 未使用キーがあり、変えても効かない状態だった）
   output_format: "mp4"
   ffmpeg_path: "C:/Users/orang/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.1-full_build/bin/ffmpeg.exe"
   temp_dir: "output"

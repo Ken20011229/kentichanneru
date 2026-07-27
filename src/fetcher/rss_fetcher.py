@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List
 
+from src.fetcher.article_extractor import strip_source_footer
+
 
 @dataclass
 class FeedItem:
@@ -28,7 +30,7 @@ def fetch_rss(feed_config: dict) -> List[FeedItem]:
                     FeedItem(
                         id=entry.get("id", entry.get("link", "")),
                         title=entry.get("title", ""),
-                        summary=entry.get("summary", "")[:800],
+                        summary=strip_source_footer(entry.get("summary", ""))[:800],
                         url=entry.get("link", ""),
                         published=published,
                         language=feed["language"],

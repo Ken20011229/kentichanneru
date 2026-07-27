@@ -23,19 +23,25 @@ _COLOR_WHITE = (255, 255, 255)
 _DEFAULT_ACCENT = (245, 166, 35)
 
 # Character at bottom
-_CHAR_RATIO = 0.63
-_CHAR_H     = int(H * _CHAR_RATIO)   # 1209px
-_CHAR_TOP   = H - _CHAR_H - 4        # 707px
+# 0.63 だとキャラが縦1209px・横717px(画面幅の66%)を占め、情報が入る領域は
+# 画面のわずか30%しか残っていなかった。縦動画で価値が高いのは中央帯なので
+# キャラを小さくしてコンテンツ領域を広げる。
+# 0.42 でもキャラ上端が y=1110 まで来るため、字幕(下端 y=1360)と重なる。
+# 0.38 にするとキャラ上端が y=1187 になり、コンテンツ枠と字幕帯の下に収まる。
+_CHAR_RATIO = 0.38
+_CHAR_H     = int(H * _CHAR_RATIO)   # 729px
+_CHAR_TOP   = H - _CHAR_H - 4        # 1187px
 
 # Content area (above character)
 CONTENT_X1 = 0
-CONTENT_Y1 = 108
+CONTENT_Y1 = 120
 CONTENT_X2 = W
-CONTENT_Y2 = _CHAR_TOP - 16          # 691px
+CONTENT_Y2 = _CHAR_TOP - 16          # 1094px
 CONTENT_W  = W                        # 1080
-CONTENT_H  = CONTENT_Y2 - CONTENT_Y1  # 583px
+CONTENT_H  = CONTENT_Y2 - CONTENT_Y1  # 974px
 
-_BADGE_TOP = 35
+# Shorts はアプリ上部の検索/戻るオーバーレイと重なるため、バッジを下げる
+_BADGE_TOP = 118
 
 DECO_CIRCLES = [
     (0.12, 0.08, 130, (245, 200, 90,  55)),
@@ -140,25 +146,36 @@ def _paste_char(canvas, path, side="right"):
 
 # ── Chrome drawers ─────────────────────────────────────────────────────────────
 
+def _draw_centered(draw, text, font, box, fill):
+    """box=(x1,y1,x2,y2) 内に光学的中央で描く（ベアリング補正つき）。"""
+    x1, y1, x2, y2 = box
+    bb = draw.textbbox((0, 0), text, font=font)
+    w, h = bb[2] - bb[0], bb[3] - bb[1]
+    draw.text(
+        (x1 + (x2 - x1 - w) // 2 - bb[0], y1 + (y2 - y1 - h) // 2 - bb[1]),
+        text, font=font, fill=fill,
+    )
+
+
 def _draw_badge(draw, fp, accent, sec_num, label, x=30, y=_BADGE_TOP):
     SQ       = 52
     font_sq  = _font(fp, 30)
     font_lbl = _font(fp, 28)
     draw.rounded_rectangle([(x, y), (x + SQ, y + SQ)], radius=8, fill=(*accent, 255))
-    n  = str(sec_num)
-    nw = _tw(draw, n, font_sq)
-    nh = _th(draw, n, font_sq)
-    draw.text((x + (SQ - nw) // 2, y + (SQ - nh) // 2), n, font=font_sq, fill=_COLOR_WHITE)
+    _draw_centered(draw, str(sec_num), font_sq, (x, y, x + SQ, y + SQ), _COLOR_WHITE)
     bw  = _tw(draw, label, font_lbl)
-    bh  = _th(draw, label, font_lbl)
     cx  = x + SQ + 10
     cw  = bw + 24
     draw.rounded_rectangle([(cx, y), (cx + cw, y + SQ)], radius=8, fill=(35, 35, 35, 235))
-    draw.text((cx + 12, y + (SQ - bh) // 2), label, font=font_lbl, fill=_COLOR_WHITE)
+    _draw_centered(draw, label, font_lbl, (cx, y, cx + cw, y + SQ), _COLOR_WHITE)
 
 
 def _draw_accent_stripe(draw, accent):
-    draw.rectangle([(0, H - 8), (W, H)], fill=(*accent, 255))
+    # 画面最下部(y=H-8)は Shorts のタイトル/チャンネル名の帯に100%隠れて
+    # 一度も見えていなかった。ブランドのアクセントは上端と、コンテンツ領域の
+    # 下辺という「実際に見える位置」に置く。
+    draw.rectangle([(0, 0), (W, 6)], fill=(*accent, 255))
+    draw.rectangle([(0, CONTENT_Y2 + 4), (W, CONTENT_Y2 + 10)], fill=(*accent, 255))
 
 
 def _draw_content_border(draw, accent):
@@ -174,7 +191,16 @@ def _draw_content_border(draw, accent):
 def _plate_intro(fp, accent, keyword, text, badge_label, char_path, side,
                  bg_image_path=None) -> Image.Image:
     """INTRO plate: accent gradient + large keyword as title. Self-contained, no content overlay."""
-    canvas = Image.new("RGBA", (W, H), (*_DARK_BG, 255))
+    # bg_image_path は引数にあるだけで一度も参照されておらず、Shorts の冒頭は
+    # 常に無地のダークネイビーだった（画面の38%が完全な空白）。写真を暗く
+    # 敷いて、最初の1秒から「何の話か」が伝わるようにする。
+    if bg_image_path:
+        canvas = _photo_bg(bg_image_path, blur=10, overlay_alpha=120)
+        canvas = Image.alpha_composite(
+            canvas, Image.new("RGBA", (W, H), (*_DARK_BG, 150))
+        )
+    else:
+        canvas = Image.new("RGBA", (W, H), (*_DARK_BG, 255))
 
     # Subtle accent glow
     glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -186,31 +212,28 @@ def _plate_intro(fp, accent, keyword, text, badge_label, char_path, side,
     canvas = _paste_char(canvas, char_path, side=side)
     draw   = ImageDraw.Draw(canvas)
 
-    cur_y = CONTENT_Y1
+    cur_y = CONTENT_Y1 + 60
     if keyword:
-        for sz in (110, 92, 78, 64, 52):
+        for sz in (150, 130, 110, 92, 78, 64, 52):
             fk = _font(fp, sz)
-            if _tw(draw, keyword, fk) <= W - 60:
+            if _tw(draw, keyword, fk) <= W - 80:
                 break
-        kw_w = _tw(draw, keyword, fk)
-        kw_h = _th(draw, keyword, fk)
-        kx   = (W - kw_w) // 2
+        bb   = draw.textbbox((0, 0), keyword, font=fk)
+        kw_w = bb[2] - bb[0]
+        kx   = (W - kw_w) // 2 - bb[0]
         draw.text((kx + 4, cur_y + 4), keyword, font=fk, fill=(0, 0, 0, 140))
         draw.text((kx, cur_y), keyword, font=fk, fill=_COLOR_WHITE)
-        uy = cur_y + kw_h + 8
-        draw.rectangle([(kx, uy), (kx + kw_w, uy + 6)], fill=(*accent, 255))
-        cur_y = uy + 28
+        # 下線は「インクの高さ(bb[3]-bb[1])」ではなく、描画原点からグリフ下端
+        # までの距離 bb[3] を使う。以前は前者を使っていたため、下線がグリフを
+        # 貫通して打ち消し線のように見えていた。
+        uy = cur_y + bb[3] + 14
+        draw.rectangle([(kx + bb[0], uy), (kx + bb[0] + kw_w, uy + 8)], fill=(*accent, 255))
 
-    # Narration preview (subtitle will show actual text)
-    if text:
-        font_sub  = _font(fp, 38)
-        sub_lines = _wrap_px(draw, text, font_sub, W - 80)[:2]
-        for ln in sub_lines:
-            draw.text((40, cur_y), ln, font=font_sub, fill=(190, 195, 210, 180))
-            cur_y += _th(draw, ln, font_sub) + 12
+    # ⚠ ここにナレーション本文を描いてはいけない。ASS字幕が同じ文をもう一度
+    # 表示するため、画面上に同じ文章が上下に二重で出る(本番Shortsで実際に
+    # 発生していた)。ナレーション全文は字幕side の責務。
 
     draw.rectangle([(0, 0), (W, 5)],     fill=(*accent, 255))
-    draw.rectangle([(0, H - 8), (W, H)], fill=(*accent, 255))
     return canvas.convert("RGB")
 
 
@@ -242,8 +265,40 @@ def _content_from_image(image_path: str) -> Image.Image:
     return img.crop((l, t, l + CONTENT_W, t + CONTENT_H))
 
 
+def _content_photo_caption(image_path: str, keyword: str, accent: tuple,
+                           fp: str) -> Image.Image:
+    """写真をコンテンツ枠に収め、キーワードを下部のテロップ帯として重ねる。
+
+    縦画面は横幅が狭く、単色板に単語だけだと情報量がゼロに近い。写真を主役に
+    して keyword はテロップにする（本編の `slide_gen._content_photo_caption`
+    と同じ方針）。
+    """
+    img = _content_from_image(image_path).convert("RGBA")
+    if not keyword:
+        return img.convert("RGB")
+
+    draw   = ImageDraw.Draw(img)
+    band_h = int(CONTENT_H * 0.18)
+    band_y = CONTENT_H - band_h
+    img.paste(Image.new("RGBA", (CONTENT_W, band_h), (10, 12, 20, 200)),
+              (0, band_y))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([(0, band_y), (CONTENT_W, band_y + 6)], fill=(*accent, 255))
+
+    for size in (104, 92, 80, 68, 58, 48, 40):
+        fk = _font(fp, size)
+        if _tw(draw, keyword, fk) <= CONTENT_W - 60:
+            break
+    bb = draw.textbbox((0, 0), keyword, font=fk)
+    kx = (CONTENT_W - (bb[2] - bb[0])) // 2 - bb[0]
+    ky = band_y + (band_h - (bb[3] - bb[1])) // 2 - bb[1]
+    draw.text((kx + 3, ky + 3), keyword, font=fk, fill=(0, 0, 0, 190))
+    draw.text((kx, ky), keyword, font=fk, fill=_COLOR_WHITE)
+    return img.convert("RGB")
+
+
 def _content_keyword(fp, keyword, accent, sec_num, sec_label) -> Image.Image:
-    """Keyword graphic for Shorts content area."""
+    """Keyword graphic for Shorts content area (写真が1枚も無いときの最後の手段)。"""
     r, g, b = accent
     img = Image.new("RGBA", (CONTENT_W, CONTENT_H), (18, 20, 32, 255))
 
@@ -305,7 +360,7 @@ def _content_section(fp, accent, section_num, sec_label) -> Image.Image:
     ghost = Image.new("RGBA", (CONTENT_W, CONTENT_H), (0, 0, 0, 0))
     ImageDraw.Draw(ghost).text(
         ((CONTENT_W - nw_n) // 2, (CONTENT_H - nh_n) // 2),
-        ns, font=font_ghost, fill=(r, g, b, 18),
+        ns, font=font_ghost, fill=(min(255, r + 40), min(255, g + 40), min(255, b + 40), 55),
     )
     img  = Image.alpha_composite(img, ghost.filter(ImageFilter.GaussianBlur(6)))
     draw = ImageDraw.Draw(img)
@@ -328,6 +383,7 @@ def generate_shorts_slides(
     output_dir: str,
     bg_image_path: str = None,
     segment_images: dict | None = None,
+    photo_pool: list[str] | None = None,
 ) -> tuple[list[str], list[str | None]]:
     """Generate Shorts frame plates and content images.
 
@@ -351,6 +407,9 @@ def generate_shorts_slides(
     total    = max(len(segments), 1)
     plate_paths   = []
     content_paths = []
+
+    pool     = [p for p in (photo_pool or []) if p and Path(p).exists()]
+    pool_pos = 0
 
     for idx, seg in enumerate(segments):
         keyword = seg.get("keyword", "")
@@ -381,8 +440,20 @@ def generate_shorts_slides(
                 plate.save(plate_path, "JPEG", quality=93)
                 plate_paths.append(plate_path)
 
+                # ⚠ 優先順位は 写真 > キーワード板 > セクション板。
+                # keyword を先に見ていたため、バリデータが必ず keyword を埋める
+                # 現状では `elif pool` に一度も到達せず、Shorts の全カットが
+                # 「画面の48.8%を占める黒板に4〜6文字」になっていた
+                # (実測: 明部画素率 1.47〜1.91%)。
+                photo = None
                 if seg_img and Path(seg_img).exists():
-                    c_img = _content_from_image(seg_img)
+                    photo = seg_img
+                elif pool:
+                    photo = pool[pool_pos % len(pool)]
+                    pool_pos += 1
+
+                if photo:
+                    c_img = _content_photo_caption(photo, keyword, accent, fp)
                 elif keyword:
                     c_img = _content_keyword(fp, keyword, accent, sec_num, sec_label)
                 else:

@@ -19,7 +19,11 @@ logger = logging.getLogger(__name__)
 
 STYLES = ["SPLIT", "IMPACT", "NEON", "CARD", "BAND"]
 
-_STRATEGY_FILE = "data/thumbnail_strategy.json"
+# evolver.py が実際に重みを書き出す先は data/strategy.json。
+# ここが data/thumbnail_strategy.json（誰も書かない存在しないファイル）を
+# 指していたため、CTRベースのサムネイル学習は一度も効いておらず、重みは
+# 永久に全スタイル 1.0 のままだった。
+_STRATEGY_FILE = "data/strategy.json"
 _STYLE_DESCRIPTIONS = {
     "SPLIT":  "回バッジ左・ゴールド大タイトル・キャラ右（ベースライン）",
     "IMPACT": "巨大テキストが画面幅を支配・キャラ小さめ右下隅",

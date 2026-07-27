@@ -8,7 +8,11 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "black-forest-labs/FLUX.1-schnell"
-API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+# api-inference.huggingface.co は廃止され、DNS解決すらできなくなっている
+# (2026-07 時点で getaddrinfo failed)。本番ログでは全画像生成が
+# ConnectionError で失敗し、動画のコンテンツ領域が常にテキストカードだけに
+# なっていた。現行の Inference Providers ルータに差し替える。
+API_URL = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
 
 
 class HuggingFaceImageClient:

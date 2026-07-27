@@ -15,11 +15,12 @@ class PexelsClient:
         self.headers = {"Authorization": api_key}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def search(self, query: str, per_page: int = 10) -> list[dict]:
+    def search(self, query: str, per_page: int = 10,
+               orientation: str = "landscape") -> list[dict]:
         resp = requests.get(
             f"{self.BASE_URL}/search",
             headers=self.headers,
-            params={"query": query, "per_page": per_page, "orientation": "landscape"},
+            params={"query": query, "per_page": per_page, "orientation": orientation},
             timeout=15,
         )
         resp.raise_for_status()
@@ -37,14 +38,29 @@ class PexelsClient:
                 f.write(r.content)
         return out_path
 
-    def fetch_images_for_keywords(self, keywords: list[str], output_dir: str, total: int = 8) -> list[str]:
-        paths = []
-        per_keyword = max(2, total // len(keywords)) if keywords else total
+    def fetch_images_for_keywords(self, keywords: list[str], output_dir: str,
+                                  total: int = 8,
+                                  orientation: str = "landscape") -> list[str]:
+        """キーワードごとに交互に1枚ずつ拾って、話題の偏りを避けつつ total 枚集める。"""
+        if not keywords:
+            return []
+        per_keyword = max(2, -(-total // len(keywords)))
+        by_keyword: list[list[str]] = []
         for kw in keywords:
             try:
-                photos = self.search(kw, per_page=per_keyword)
-                for photo in photos[:per_keyword]:
-                    paths.append(self.download(photo, output_dir))
+                photos = self.search(kw, per_page=per_keyword, orientation=orientation)
+                by_keyword.append([self.download(p, output_dir) for p in photos[:per_keyword]])
             except Exception as e:
                 logger.warning(f"Pexels search failed for '{kw}': {e}")
+                by_keyword.append([])
+
+        paths, seen = [], set()
+        for rank in range(per_keyword):
+            for bucket in by_keyword:
+                if rank < len(bucket) and bucket[rank] not in seen:
+                    seen.add(bucket[rank])
+                    paths.append(bucket[rank])
+        logger.info(
+            f"Pexels: {len(paths)} {orientation} photo(s) for {len(keywords)} keyword(s)"
+        )
         return paths[:total]
