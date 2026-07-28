@@ -11,7 +11,12 @@ class ClaudeTranslator:
 
     def __init__(self, config: dict):
         self.client = Groq(api_key=os.environ.get("GROQ_API_KEY") or config.get("groq_api_key", ""))
-        self.model = config.get("groq_model", "llama-3.3-70b-versatile")
+        # Groq のレート上限はモデルごとに独立した枠なので、翻訳を別モデルへ
+        # 逃がすと本編台本(70B)の日次予算をそのぶん温存できる。
+        # ただし安ければ良いわけではない。llama-3.1-8b-instant は実測で
+        # "walking 7,000 steps" を「70,000歩」と書き換えたため採用しない。
+        # gpt-oss-120b は数値が正確で、現行の 70B より訳文も自然だった。
+        self.model = config.get("groq_translate_model", "openai/gpt-oss-120b")
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=4, max=30))
     def translate_batch(self, texts: list[str]) -> list[str]:

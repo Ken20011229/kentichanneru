@@ -1,6 +1,10 @@
 groq:
   groq_api_key: "${GROQ_API_KEY}"
-  groq_model: "llama-3.3-70b-versatile"
+  # レート上限はモデルごとに独立した枠なので、本編台本以外を別モデルへ逃がすと
+  # 本編用の日次トークン予算(70B は TPD 10万)をそのぶん温存できる。
+  groq_model: "llama-3.3-70b-versatile"           # 本編台本
+  groq_research_model: "openai/gpt-oss-120b"      # deep-dive のリサーチ
+  groq_translate_model: "openai/gpt-oss-120b"     # 英→日翻訳
 
 sources:
   rss:

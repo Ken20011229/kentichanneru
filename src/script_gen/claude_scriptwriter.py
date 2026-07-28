@@ -36,6 +36,16 @@ _FILLER_RE = re.compile(r"(ご視聴ありがとう|視聴ありがとう|よろ
 _CTA_RE    = re.compile(r"(チャンネル登録|高評価)")
 
 
+# 段落数がプロンプトの下限をこれだけ下回るまでは、作り直さずに受け入れる。
+# 下限ちょうどを1段落だけ外した台本を捨てて全文を再生成すると、1回あたり
+# 6,000〜7,000トークンを消費する。Groq の on_demand は TPD 10万なので、
+# この作り直しが数回重なるだけで日次予算を使い切り、以降の記事は 429 で
+# 全滅する（実測: run 30356281642 は 12/13 段落の作り直しを起点に破綻）。
+# 段落が1つ少なくても尺は約20秒縮むだけで、文字数・反復・接地の各チェックは
+# そのまま効くため、品質より予算を守るほうが割に合う。
+_SEGMENT_SHORTFALL_TOLERANCE = 1
+
+
 def _segment_range(material_chars: int) -> tuple[int, int]:
     """素材の分量から、要求する段落数の範囲を決める。
 
@@ -345,6 +355,10 @@ class ClaudeScriptWriter:
     def __init__(self, config: dict):
         self.client = Groq(api_key=os.environ.get("GROQ_API_KEY") or config.get("groq_api_key", ""))
         self.model = config.get("groq_model", "llama-3.3-70b-versatile")
+        # Groq のレート上限はモデルごとに独立した枠。リサーチを本編台本と同じ
+        # モデルで回すと、フォールバックが本編用の日次予算を削ってしまう。
+        # 別モデルに逃がすぶんには、そもそも別の枠から引くので本編に影響しない。
+        self.research_model = config.get("groq_research_model", "openai/gpt-oss-120b")
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=4, max=30))
     def generate(self, item: dict, channel: dict = None) -> dict:
@@ -394,11 +408,16 @@ class ClaudeScriptWriter:
         """Step 1: Generate a detailed research summary for the topic (plain text)."""
         prompt = _RESEARCH_PROMPT.format(original_title=original_title)
         response = self.client.chat.completions.create(
-            model=self.model,
+            model=self.research_model,
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.choices[0].message.content.strip()
-        logger.info(f"Research summary generated ({len(text)} chars) for: {original_title}")
+        usage = getattr(response, "usage", None)
+        logger.info(
+            f"Research summary generated ({len(text)} chars) via {self.research_model}"
+            + (f", {usage.total_tokens} tokens" if usage else "")
+            + f" for: {original_title}"
+        )
         return text
 
     def generate_deep_dive(self, original_title: str, channel: dict = None) -> dict:
@@ -464,9 +483,19 @@ class ClaudeScriptWriter:
                 f"Non-Japanese characters detected in script (likely Chinese/Korean "
                 f"leak): {sorted(foreign)}. Regenerating in pure Japanese."
             )
-        if len(segments) < min_segments:
+        # プロンプトでの要求は min_segments のまま据え置き、受け入れ判定だけ
+        # 1段落ぶん緩める。要求を下げると出力もそのぶん下振れするため。
+        floor = min_segments - _SEGMENT_SHORTFALL_TOLERANCE
+        if len(segments) < floor:
             raise ValueError(
-                f"Too few script_segments: {len(segments)} (minimum {min_segments} required)"
+                f"Too few script_segments: {len(segments)} "
+                f"(minimum {floor} required; {min_segments} requested)"
+            )
+        if len(segments) < min_segments:
+            logger.warning(
+                f"script_segments below the requested range: {len(segments)} < {min_segments} "
+                f"— accepting within tolerance ({_SEGMENT_SHORTFALL_TOLERANCE}) instead of "
+                f"regenerating, to conserve the daily token budget"
             )
         if max_segments and len(segments) > max_segments:
             logger.warning(
