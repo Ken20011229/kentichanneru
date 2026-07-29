@@ -16,6 +16,32 @@ def _run(cmd: list[str], label: str, cwd: str = None):
         raise RuntimeError(f"FFmpeg {label} failed (exit {result.returncode})")
 
 
+def concat_clips_lossless(
+    ffmpeg: str, clip_paths: list[str], out_path: str,
+) -> str:
+    """クリップを再エンコードせずに繋ぐ（ハードカット）。
+
+    xfade と違って累積結果を作り直さないので、本数に対して線形。
+    render_slide_clip の出力はコーデック・解像度・fps が全て揃っているため
+    -c copy がそのまま成立する。1 本だけのときは連結不要なのでそのまま返す。
+    """
+    if len(clip_paths) == 1:
+        return clip_paths[0]
+
+    list_path = os.path.splitext(out_path)[0] + ".txt"
+    with open(list_path, "w", encoding="utf-8") as f:
+        for p in clip_paths:
+            # concat demuxer の list は ' をエスケープする必要がある
+            f.write("file '{}'\n".format(os.path.abspath(p).replace("'", r"'\''")))
+
+    _run(
+        [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+         "-c", "copy", out_path],
+        "concat clips",
+    )
+    return out_path
+
+
 def render_slide_clip(
     ffmpeg: str,
     plate_path: str,

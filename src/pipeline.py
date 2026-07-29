@@ -391,7 +391,7 @@ def _run_shared_pipeline_stages(
         {**seg, "segment_index": i}
         for i, seg in enumerate(script_data["script_segments"])
     ]
-    slide_plate_paths, slide_content_paths, per_slide_durations = generate_slides(
+    slide_plate_paths, slide_content_paths, per_slide_durations, cuts_per_slide = generate_slides(
         segs_with_meta,
         title=script_data["title"],
         config=config,
@@ -422,6 +422,7 @@ def _run_shared_pipeline_stages(
         se_path=se_path,
         per_slide_durations=per_slide_durations,
         character_layers=character_layers,
+        cuts_per_slide=cuts_per_slide,
     )
 
     # Stage 8: Generate thumbnail

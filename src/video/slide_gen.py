@@ -571,10 +571,17 @@ def generate_slides(
     平均24.6秒のセグメントが3カットにしか割れず、1カット8秒超のままだった。
 
     Returns:
-        (plate_paths, content_paths, slide_durations)
+        (plate_paths, content_paths, slide_durations, cuts_per_slide)
         plate_paths     — static chrome frames (1920×1080), characters are a separate overlay
         content_paths   — content images (CONTENT_W×CONTENT_H) to animate, or None for intro
         slide_durations — カットごとの表示秒(durations 未指定なら None)
+        cuts_per_slide  — セグメントごとのカット数。plate_paths はカット単位で
+                          平坦化されているため、これが無いと composer 側で
+                          「どこがセグメントの切れ目か」を復元できない。
+                          セグメント内のカットは無劣化 concat、セグメント境界だけ
+                          xfade する分岐に使う（xfade は結合のたびに累積結果を
+                          再エンコードするので、カット単位でつなぐと総エンコード量が
+                          O(N^2) になり 64 カットで 60 分の枠に収まらなくなる）。
     """
     os.makedirs(output_dir, exist_ok=True)
     plates_dir  = os.path.join(output_dir, "plates")
@@ -595,6 +602,7 @@ def generate_slides(
     plate_paths     = []
     content_paths   = []
     slide_durations = []
+    cuts_per_slide  = []
 
     pool     = [p for p in (photo_pool or []) if p and Path(p).exists()]
     pool_pos = 0
@@ -717,6 +725,7 @@ def generate_slides(
         for plate_p, content_p, _kind in cuts:
             plate_paths.append(plate_p)
             content_paths.append(content_p)
+        cuts_per_slide.append(len(cuts))
         if seg_dur is not None:
             slide_durations.extend([seg_dur / len(cuts)] * len(cuts))
 
@@ -726,4 +735,4 @@ def generate_slides(
             + (f" over {seg_dur:.1f}s" if seg_dur else "")
         )
 
-    return plate_paths, content_paths, (slide_durations or None)
+    return plate_paths, content_paths, (slide_durations or None), cuts_per_slide

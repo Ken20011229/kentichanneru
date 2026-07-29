@@ -6,7 +6,9 @@ import subprocess
 from pathlib import Path
 
 from src.video.slide_gen import CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H
-from src.video.slide_render import render_slide_clip, merge_clips_sequential
+from src.video.slide_render import (
+    render_slide_clip, merge_clips_sequential, concat_clips_lossless,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,7 @@ def render_video(
     se_path: str = None,
     per_slide_durations: list[float] | None = None,
     character_layers: list[dict] | None = None,
+    cuts_per_slide: list[int] | None = None,
 ) -> str:
     """Render final video using a three-layer approach.
 
@@ -109,17 +112,48 @@ def render_video(
     clips_dir = os.path.join(work_dir, "clips")
     os.makedirs(clips_dir, exist_ok=True)
 
-    clip_paths = []
-    for i in range(n):
-        clip_dur = slide_durs[i] + fade_dur
-        clip_out = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
-        render_slide_clip(
-            ffmpeg, plate_paths[i], content_paths[i], clip_dur, fps,
-            int(res_w), int(res_h), CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H,
-            clip_out,
-            pan_right=(i % 2 == 0),
-        )
-        clip_paths.append(clip_out)
+    # plate_paths はカット単位に平坦化されている。cuts_per_slide でセグメント
+    # 境界を復元し、セグメント内はハードカット、境界だけ xfade でつなぐ。
+    # xfade は結合のたびに「それまでの累積結果」を再エンコードするため、
+    # カット単位でつなぐと総エンコード量が O(N^2) になる。64 カット・250 秒の
+    # 実測では 2 時間 16 分ぶんのエンコードに相当し、60 分の枠を超えて
+    # run 30455026545 がタイムアウトした。境界だけなら結合は 13 回で済む。
+    if cuts_per_slide and sum(cuts_per_slide) == n:
+        groups, at = [], 0
+        for c in cuts_per_slide:
+            groups.append(list(range(at, at + c)))
+            at += c
+    else:
+        groups = [[i] for i in range(n)]
+
+    clip_paths   = []
+    group_durs   = []
+    for g_idx, group in enumerate(groups):
+        cut_clips = []
+        for i in group:
+            # xfade 用の予備 fade_dur は、次の xfade に食われるセグメント末尾の
+            # カットにだけ持たせる。中間のカットはハードカットなので不要。
+            clip_dur = slide_durs[i] + (fade_dur if i == group[-1] else 0.0)
+            clip_out = os.path.join(clips_dir, f"clip_{i:03d}.mp4")
+            render_slide_clip(
+                ffmpeg, plate_paths[i], content_paths[i], clip_dur, fps,
+                int(res_w), int(res_h), CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H,
+                clip_out,
+                pan_right=(i % 2 == 0),
+            )
+            cut_clips.append(clip_out)
+
+        clip_paths.append(concat_clips_lossless(
+            ffmpeg, cut_clips, os.path.join(clips_dir, f"slide_{g_idx:03d}.mp4"),
+        ))
+        group_durs.append(sum(slide_durs[i] for i in group))
+
+    slide_durs = group_durs
+    n = len(clip_paths)
+    logger.info(
+        f"Rendered {sum(len(g) for g in groups)} cut(s) into {n} slide clip(s); "
+        f"{max(n - 1, 0)} xfade merge(s) to follow"
+    )
 
     # ── Step 5: Merge clips via sequential xfade (input count always 2) ───────
     # Only fade-family transitions for background — content/text animate independently
