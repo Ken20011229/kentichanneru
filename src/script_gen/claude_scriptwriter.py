@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from groq import Groq
+from groq import Groq, RateLimitError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,65 @@ _CTA_RE    = re.compile(r"(チャンネル登録|高評価)")
 # 段落が1つ少なくても尺は約20秒縮むだけで、文字数・反復・接地の各チェックは
 # そのまま効くため、品質より予算を守るほうが割に合う。
 _SEGMENT_SHORTFALL_TOLERANCE = 1
+
+
+class ScriptTooShort(ValueError):
+    """段落が短いだけの不合格。作り直さず、伸ばすリペアで回復できる。
+
+    実測では llama-3.3-70b が本文平均 101 字、gpt-oss-120b が 88 字しか書かず、
+    要求している 120〜170 字にはどちらもゼロから書かせる限り届かない。同じ
+    プロンプトを投げ直しても同じ長さが返るだけなので、作り直しは 6,000 トークンを
+    捨てるのと変わらない。既にある文を膨らませるほうが確実で、実測で 115→126 字。
+    """
+
+
+class TokenBudgetExhausted(RuntimeError):
+    """この実行に割り当てたトークンを使い切った。"""
+
+
+# ── 1 実行あたりのトークン予算 ────────────────────────────────────────────────
+# Groq の on_demand は TPD 10 万（モデルごとに独立した枠）。1 日 2 投稿なので
+# 1 回 5 万が公平な取り分で、安全側に 4.5 万を上限とする。
+# これが無いと、失敗した 1 回が日次枠を全部焼き切って以降の回まで 429 で全滅する
+# （実測: 07-27〜07-29 の 4 回連続失敗はこの連鎖。1 実行で 12 回の作り直しを
+# 走らせて 67,000 トークンを消費していた）。上限に当たったら早く諦めて、
+# 残りを次の回に残すほうが 1 日あたりの投稿数は増える。
+_TOKEN_BUDGET_PER_RUN = 45_000
+_tokens_used: dict[str, int] = {}
+
+
+def _spend_tokens(model: str, n: int):
+    _tokens_used[model] = _tokens_used.get(model, 0) + n
+
+
+def _budget_left(model: str) -> int:
+    return _TOKEN_BUDGET_PER_RUN - _tokens_used.get(model, 0)
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """gpt-oss 系は推論モデルで、他とは呼び出し方が違う。
+
+    - response_format={"type":"json_object"} を付けると 400 json_validate_failed
+    - reasoning_effort を既定のままにすると推論だけで completion 上限を使い切り、
+      content が空のまま finish_reason="length" で返る（実測: 推論 3,070 トークン）
+    "low" にすると推論は約 38 トークンに収まり、JSON 本体が content に出る。
+    """
+    return "gpt-oss" in model
+
+
+_JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.M)
+
+
+def _parse_json_lenient(raw: str) -> dict:
+    """gpt-oss は ```json フェンスを付けて返すことがあるので剥がしてから読む。"""
+    text = _JSON_FENCE_RE.sub("", raw.strip())
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            raise
+        return json.loads(m.group(0))
 
 
 def _segment_range(material_chars: int) -> tuple[int, int]:
@@ -351,10 +410,37 @@ SCRIPT_PROMPT = """\
 """
 
 
+_EXPAND_PROMPT = """\
+あなたは日本語YouTube台本の編集者です。
+以下の台本は各段落が短すぎて尺が足りません。**内容を変えずに各段落を膨らませて**ください。
+
+## 絶対条件
+- 段落の数・順序・話の流れは変えない（{n}個のまま返す）
+- 2段落目以降は必ず **120〜170文字（3〜5文）** にする。今より短くしない
+- 膨らませ方は「その段落で述べた事実の背景・理由・具体例・視聴者にとっての意味」を足す
+- **元記事に無い地名・固有名詞・数値を新しく作らない**（下の元記事の範囲だけで書く）
+- 1段落目（フック）は 50〜70文字のまま短く保つ
+- 同じ文を他の段落で繰り返さない
+
+## 元記事
+{source}
+
+## 現在の段落
+{current}
+
+## 出力
+JSONのみを返す。形式: {{"segments": ["1段落目の全文", "2段落目の全文", ...]}}
+"""
+
+
 class ClaudeScriptWriter:
     def __init__(self, config: dict):
         self.client = Groq(api_key=os.environ.get("GROQ_API_KEY") or config.get("groq_api_key", ""))
         self.model = config.get("groq_model", "llama-3.3-70b-versatile")
+        # 本編モデルの日次枠が尽きたときの逃げ先。枠はモデルごとに独立しているので、
+        # 片方が 429 でも投稿を落とさずに済む。実測の文章量は 70B(101字) のほうが
+        # gpt-oss(88字) より上なので、あくまで本編は 70B を主・こちらを従とする。
+        self.fallback_model = config.get("groq_fallback_model", "openai/gpt-oss-120b")
         # Groq のレート上限はモデルごとに独立した枠。リサーチを本編台本と同じ
         # モデルで回すと、フォールバックが本編用の日次予算を削ってしまう。
         # 別モデルに逃がすぶんには、そもそも別の枠から引くので本編に影響しない。
@@ -381,38 +467,132 @@ class ClaudeScriptWriter:
         )
         if hints:
             prompt += f"\n\n{hints}"
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+        data = self._chat_json(prompt)
+
+        source_text = f"{item.get('title', '')}\n{material}"
+        try:
+            self._validate(data, min_segments=min_segments, max_segments=max_segments,
+                           source_text=source_text)
+        except ScriptTooShort as e:
+            # 同じプロンプトを投げ直しても同じ長さが返るだけなので作り直さない。
+            # 既にある文を膨らませるほうがトークンも半分で済み、実測でも通る。
+            logger.warning(f"{e} — 作り直さず、既存の段落を伸ばすリペアに回す")
+            data = self._expand_segments(data, source_text=source_text)
+            self._validate(data, min_segments=min_segments, max_segments=max_segments,
+                           source_text=source_text)
+        return data
+
+    def _chat_json(self, prompt: str, purpose: str = "script") -> dict:
+        """JSON を返させる。日次枠が尽きているモデルは飛ばして次のモデルへ回す。
+
+        Groq のレート上限はモデルごとに独立した枠なので、本編モデルが 429 でも
+        フォールバックモデルなら通る。ここで諦めないことが投稿の欠落を直接減らす。
+        """
+        last_exc = None
+        for model in (self.model, self.fallback_model):
+            if not model:
+                continue
+            if _budget_left(model) <= 0:
+                logger.warning(
+                    f"[{purpose}] {model}: この実行のトークン予算 "
+                    f"{_TOKEN_BUDGET_PER_RUN} を使い切ったので次のモデルへ"
+                )
+                continue
+
+            kwargs = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+            if _is_reasoning_model(model):
+                kwargs["reasoning_effort"] = "low"
+            else:
+                kwargs["response_format"] = {"type": "json_object"}
+
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+            except RateLimitError as e:
+                logger.warning(f"[{purpose}] {model}: レート上限に到達、次のモデルへ — {e}")
+                last_exc = e
+                continue
+
+            usage = getattr(response, "usage", None)
+            if usage:
+                _spend_tokens(model, usage.total_tokens)
+                logger.info(
+                    f"[{purpose}] Groq tokens ({model}): prompt={usage.prompt_tokens} "
+                    f"completion={usage.completion_tokens} total={usage.total_tokens} "
+                    f"| この実行の残り予算 {_budget_left(model)}"
+                )
+
+            raw = (response.choices[0].message.content or "").strip()
+            if not raw:
+                # 推論モデルが content を空で返すのは推論に completion 上限を
+                # 使い切ったとき。reasoning_effort=low で防いでいるが、念のため。
+                logger.warning(
+                    f"[{purpose}] {model}: content が空 "
+                    f"(finish_reason={response.choices[0].finish_reason}) — 次のモデルへ"
+                )
+                last_exc = ValueError(f"{model} returned empty content")
+                continue
+
+            try:
+                return _parse_json_lenient(raw)
+            except json.JSONDecodeError as e:
+                logger.error(f"[{purpose}] {model}: JSON parse 失敗: {e}\nRaw:\n{raw[:500]}")
+                last_exc = e
+                continue
+
+        if last_exc:
+            raise last_exc
+        raise TokenBudgetExhausted(
+            f"[{purpose}] 全モデルがこの実行のトークン予算 {_TOKEN_BUDGET_PER_RUN} を使い切った"
         )
-        raw = response.choices[0].message.content.strip()
-        usage = getattr(response, "usage", None)
-        if usage:
-            logger.info(
-                f"Groq tokens: prompt={usage.prompt_tokens} "
-                f"completion={usage.completion_tokens} total={usage.total_tokens}"
+
+    def _expand_segments(self, data: dict, source_text: str) -> dict:
+        """短い段落を作り直さずに膨らませる。
+
+        丸ごと再生成は 6,000〜7,000 トークンを使ったうえで同じ長さが返るだけだが、
+        リペアなら本文ぶん（実測 2,800 トークン）で済み、実測で平均 115→126 字。
+        """
+        segments = data.get("script_segments", [])
+        texts = [s.get("text", "") for s in segments]
+        if not texts:
+            raise ScriptTooShort("script_segments が空でリペアできない")
+
+        numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+        rep = self._chat_json(
+            _EXPAND_PROMPT.format(n=len(texts), source=source_text, current=numbered),
+            purpose="expand",
+        )
+        new_texts = rep.get("segments") or []
+        if len(new_texts) != len(texts):
+            raise ScriptTooShort(
+                f"リペアが段落数を変えた（{len(texts)} → {len(new_texts)}）ため破棄"
             )
 
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as e:
-            logger.error(f"Script JSON parse failed: {e}\nRaw:\n{raw[:500]}")
-            raise
-
-        self._validate(data, min_segments=min_segments, max_segments=max_segments,
-                       source_text=f"{item.get('title', '')}\n{material}")
+        # 「今より短くしない」はプロンプトの指示に任せず機械的に保証する。
+        grown = 0
+        for seg, new in zip(segments, new_texts):
+            new = (new or "").strip()
+            if len(new) > len(seg.get("text", "")):
+                seg["text"] = new
+                grown += 1
+        body = [s.get("text", "") for s in segments][1:] or [s.get("text", "") for s in segments]
+        logger.info(
+            f"リペア完了: {grown}/{len(segments)} 段落を伸長、"
+            f"本文平均 {sum(len(t) for t in body) / max(len(body), 1):.0f} 字"
+        )
         return data
 
     def _research_topic(self, original_title: str) -> str:
         """Step 1: Generate a detailed research summary for the topic (plain text)."""
         prompt = _RESEARCH_PROMPT.format(original_title=original_title)
-        response = self.client.chat.completions.create(
-            model=self.research_model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = response.choices[0].message.content.strip()
+        kwargs = {"model": self.research_model,
+                  "messages": [{"role": "user", "content": prompt}]}
+        if _is_reasoning_model(self.research_model):
+            kwargs["reasoning_effort"] = "low"
+        response = self.client.chat.completions.create(**kwargs)
+        text = (response.choices[0].message.content or "").strip()
         usage = getattr(response, "usage", None)
+        if usage:
+            _spend_tokens(self.research_model, usage.total_tokens)
         logger.info(
             f"Research summary generated ({len(text)} chars) via {self.research_model}"
             + (f", {usage.total_tokens} tokens" if usage else "")
@@ -520,13 +700,15 @@ class ClaudeScriptWriter:
                 f"Hook segment is {len(hook_text)} chars (~{len(hook_text)/6.1:.0f}s) — "
                 f"viewers decide within the first few seconds; 50-70 chars is the target"
             )
+        # 長さ不足は ScriptTooShort で投げる。generate 側がこれだけを捕まえて、
+        # 作り直しではなく伸ばすリペアに回す。
         if avg_chars < 115:
-            raise ValueError(
+            raise ScriptTooShort(
                 f"Average segment too short: {avg_chars:.1f} chars "
                 f"(segments after the hook must be 3-5 sentences, 120-170 chars)"
             )
         if short_segs > max(1, len(body_texts) * 0.15):
-            raise ValueError(
+            raise ScriptTooShort(
                 f"Too many short segments: {short_segs}/{len(body_texts)} under 100 chars. "
                 f"Segments after the hook must be 120-170 chars (3-5 sentences)."
             )

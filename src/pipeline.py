@@ -19,7 +19,7 @@ from src.fetcher.article_extractor import fetch_article_body
 from src.images.fallback_generator import generate_fallback_images
 from src.images.pexels_client import PexelsClient
 from src.images.unsplash_client import UnsplashClient
-from src.script_gen.claude_scriptwriter import ClaudeScriptWriter
+from src.script_gen.claude_scriptwriter import ClaudeScriptWriter, TokenBudgetExhausted
 from src.translator.claude_translator import ClaudeTranslator
 from src.tts.voicevox_client import VoicevoxClient
 from src.uploader.youtube_uploader import YouTubeUploader
@@ -637,7 +637,11 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
         # Stage 3: Generate script and metadata
         writer = ClaudeScriptWriter(config["groq"])
         script_data = None
-        for _item_attempt in range(6):
+        # 記事を替えても短さの傾向は変わらない（モデルの実力の問題で、記事の
+        # 良し悪しではない）。6 記事を舐めても通らず、そのあいだに日次トークンを
+        # 焼き切って以降の回まで 429 で落とすほうが損なので、リペアで拾えなかった
+        # ぶんだけ数記事試す。予算切れの時点でループは即座に打ち切る。
+        for _item_attempt in range(3):
             try:
                 # 台本の素材は要約(百数十字)ではなく記事本文から取る
                 if not item.get("body"):
@@ -647,6 +651,10 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
             except Exception as e:
                 cause = e.last_attempt.exception() if hasattr(e, "last_attempt") else e
                 logger.warning(f"Script generation failed for '{item['title']}': {cause!r}")
+                if isinstance(cause, TokenBudgetExhausted):
+                    # 記事を替えても叩くトークンが無い。次の回のために枠を残して降りる。
+                    logger.error(f"{cause} — 残りの記事は試さず、次の回に予算を残して中断する")
+                    break
                 next_item = fetch_and_select_item(config, dedup, channel=channel)
                 if not next_item:
                     raise RuntimeError("No more items available after script failures") from e
@@ -662,7 +670,7 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
                 logger.info(f"Retrying with next item: '{item['title']}'")
         if script_data is None:
             logger.warning(
-                f"All 6 item attempts failed via generate(); "
+                f"All item attempts failed via generate(); "
                 f"falling back to deep-dive expansion for '{item['title']}'"
             )
             try:

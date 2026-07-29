@@ -36,8 +36,11 @@ class ClaudeTranslator:
                     ),
                 }
             ],
+            # gpt-oss 系は推論モデル。effort を既定のままにすると推論だけで
+            # completion 上限を使い切り、content が空で返ることがある（実測）。
+            **({"reasoning_effort": "low"} if "gpt-oss" in self.model else {}),
         )
-        raw = response.choices[0].message.content.strip()
+        raw = (response.choices[0].message.content or "").strip()
         lines = [l.strip() for l in raw.split("\n") if l.strip()]
         results = []
         for line in lines:
