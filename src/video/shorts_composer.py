@@ -7,7 +7,9 @@ from pathlib import Path
 
 from src.video.composer import _LOUDNORM
 from src.video.shorts_slide_gen import CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H
-from src.video.slide_render import render_slide_clip, merge_clips_sequential
+from src.video.slide_render import (
+    render_slide_clip, merge_clips_at_boundaries, snap_to_frame,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,7 @@ def render_shorts(
         shutil.copy2(font_src, local_font)
 
     n        = max(len(plate_paths), 1)
-    fade_dur = 0.25
+    fade_dur = snap_to_frame(0.25, fps)
     display_dur = 3.0
 
     slide_durs = per_slide_durations if (per_slide_durations and len(per_slide_durations) == n) else [display_dur] * n
@@ -92,7 +94,7 @@ def render_shorts(
     if n == 1:
         slideshow_path = clip_paths[0]
     else:
-        slideshow_path, _ = merge_clips_sequential(
+        slideshow_path, _ = merge_clips_at_boundaries(
             ffmpeg, clip_paths, slide_durs, fade_dur, _SHORTS_TRANSITIONS, clips_dir,
         )
 

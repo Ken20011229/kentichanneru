@@ -7,7 +7,8 @@ from pathlib import Path
 
 from src.video.slide_gen import CONTENT_X1, CONTENT_Y1, CONTENT_W, CONTENT_H
 from src.video.slide_render import (
-    render_slide_clip, merge_clips_sequential, concat_clips_lossless,
+    render_slide_clip, merge_clips_at_boundaries, concat_clips_lossless,
+    snap_to_frame,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ def render_video(
     fps       = config["video"].get("fps", 30)
     resolution = config["video"].get("resolution", "1920x1080")
     bgm_vol   = config["video"].get("bgm_volume", 0.15)
-    fade_dur  = config["video"].get("xfade_duration", 0.5)
+    fade_dur  = snap_to_frame(config["video"].get("xfade_duration", 0.5), fps)
     se_vol    = config.get("se", {}).get("volume", 0.70)
     display_dur = config["video"].get("display_duration_sec", 5)
 
@@ -167,9 +168,12 @@ def render_video(
     if n == 1:
         slideshow_path = clip_paths[0]
     else:
-        slideshow_path, _ = merge_clips_sequential(
+        slideshow_path, _ = merge_clips_at_boundaries(
             ffmpeg, clip_paths, slide_durs, fade_dur, _TRANSITIONS, clips_dir,
         )
+    # 結合と最終合成はどちらも数分かかる。どちらが重いのか本番ログから切り分け
+    # られるよう、境目にログを置く。
+    logger.info("Slide clips merged; compositing characters, subtitles and audio")
 
     # ── Step 6: Final composite — character overlay + audio mix ───────────────
     # 入力は video 1本 + character(あれば)1本 + narration/bgm/se の高々5本の
