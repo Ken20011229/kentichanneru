@@ -5,12 +5,31 @@ on:
     - cron: '0 12 * * 1'  # 毎週月曜 21:00 JST
   workflow_dispatch:
 
+# 空コミットを push するので書き込み権限が要る。既定は contents: read で、
+# 以前の失敗ログでもこれが read のままだった。
+permissions:
+  contents: write
+
 jobs:
   keepalive:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: gautamkrishnar/keepalive-workflow@v2
-        with:
-          committer_username: 'github-actions[bot]'
-          committer_email: 'github-actions[bot]@users.noreply.github.com'
+
+      # GitHub は 60 日間コミットが無いリポジトリのスケジュール実行を自動停止する。
+      # data/ は actions/cache 経由で受け渡していてコミットが発生しないため、
+      # 手を入れない期間が続くと自動投稿ごと止まる。週1の空コミットで防ぐ。
+      #
+      # 以前は gautamkrishnar/keepalive-workflow@v2 を使っていたが、2026-07-06 以降
+      # action のダウンロード段階で "Repository access blocked" となり5回連続で
+      # 失敗していた（07-06 / 07-13 / 07-20 / 07-27 / 08-03）。外部 action に
+      # 依存せず git だけで済ませる。
+      #
+      # GITHUB_TOKEN による push は他のワークフローを起動しないので、
+      # autoposter が誤って走ることはない。
+      - name: Push an empty commit to keep the schedule armed
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git commit --allow-empty -m 'chore: keepalive (scheduled workflows stay enabled)'
+          git push
