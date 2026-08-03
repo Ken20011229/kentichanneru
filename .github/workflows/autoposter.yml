@@ -9,7 +9,11 @@ on:
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 実測の成功実行は 31〜46 分（本編レンダリング 19〜21 分＋Shorts 14 分〜）で、
+    # 60 分では遅いランナーを引いたときに完走できず cancelled になっていた
+    # （07-29 / 07-31 / 08-02 の 3 回。いずれも Shorts レンダリング中に打ち切り）。
+    # 枠を広げてもレンダリングが終われば即終了するので、平均消費時間は変わらない。
+    timeout-minutes: 150
 
     steps:
       - uses: actions/checkout@v4

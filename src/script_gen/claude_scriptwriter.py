@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -36,6 +37,24 @@ _FILLER_RE = re.compile(r"(ご視聴ありがとう|視聴ありがとう|よろ
 _CTA_RE    = re.compile(r"(チャンネル登録|高評価)")
 
 
+def _bigrams(text: str) -> set[str]:
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def _keeps_topic(original: str, expanded: str, threshold: float = 0.4) -> bool:
+    """伸長後の段落が、元の段落と同じ内容を指しているか。
+
+    リペアが段落数を変えたときに zip の対応がズレていないかを確かめる用途。
+    伸長は元の文を残したまま背景や具体例を足す操作なので、対応が取れていれば
+    元の文字 bigram の多くがそのまま残る。言い換えを含んでも半分は残るため、
+    閾値は 0.4 で「別の段落を掴んでいる」ケースだけを弾く。
+    """
+    base = _bigrams(original)
+    if not base:
+        return False
+    return len(base & _bigrams(expanded)) / len(base) >= threshold
+
+
 # 段落数がプロンプトの下限をこれだけ下回るまでは、作り直さずに受け入れる。
 # 下限ちょうどを1段落だけ外した台本を捨てて全文を再生成すると、1回あたり
 # 6,000〜7,000トークンを消費する。Groq の on_demand は TPD 10万なので、
@@ -44,6 +63,12 @@ _CTA_RE    = re.compile(r"(チャンネル登録|高評価)")
 # 段落が1つ少なくても尺は約20秒縮むだけで、文字数・反復・接地の各チェックは
 # そのまま効くため、品質より予算を守るほうが割に合う。
 _SEGMENT_SHORTFALL_TOLERANCE = 1
+
+# 本文平均文字数の合格ライン。通常はこれ、全滅時の救済（salvage）ではこれを
+# 下回る台本も受け入れる。実測 08-03 の失敗は本文平均 111.8 字 / 112.7 字
+# ——合格ラインに 2〜3 字届かないだけの台本を捨てて投稿ごと消していた。
+_MIN_AVG_CHARS     = 115
+_SALVAGE_MIN_AVG_CHARS = 95
 
 
 class ScriptTooShort(ValueError):
@@ -445,6 +470,9 @@ class ClaudeScriptWriter:
         # モデルで回すと、フォールバックが本編用の日次予算を削ってしまう。
         # 別モデルに逃がすぶんには、そもそも別の枠から引くので本編に影響しない。
         self.research_model = config.get("groq_research_model", "openai/gpt-oss-120b")
+        # 長さ不足で落とした台本のうち最良の1本。全アイテムが全滅したときに
+        # salvage() が緩めた基準で拾い直す（_avg, data, min_seg, max_seg, source）。
+        self._salvage: tuple[float, dict, int, int | None, str] | None = None
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=2, min=4, max=30))
     def generate(self, item: dict, channel: dict = None) -> dict:
@@ -477,9 +505,52 @@ class ClaudeScriptWriter:
             # 同じプロンプトを投げ直しても同じ長さが返るだけなので作り直さない。
             # 既にある文を膨らませるほうがトークンも半分で済み、実測でも通る。
             logger.warning(f"{e} — 作り直さず、既存の段落を伸ばすリペアに回す")
+            self._remember_salvage(data, min_segments, max_segments, source_text)
             data = self._expand_segments(data, source_text=source_text)
+            try:
+                self._validate(data, min_segments=min_segments, max_segments=max_segments,
+                               source_text=source_text)
+            except ScriptTooShort:
+                self._remember_salvage(data, min_segments, max_segments, source_text)
+                raise
+        return data
+
+    def _remember_salvage(self, data: dict, min_segments: int,
+                          max_segments: int | None, source_text: str):
+        """長さ不足で落ちた台本を、本文平均が最良のものだけ取っておく。
+
+        投稿を1回まるごと落とすより、少し短い台本で出すほうが確実に良い。
+        ここでは記録だけして、実際に使うかどうかは salvage() が判断する。
+        """
+        segments = (data or {}).get("script_segments") or []
+        if not segments:
+            return
+        texts = [s.get("text", "") for s in segments]
+        body  = texts[1:] or texts
+        avg   = sum(len(t) for t in body) / max(len(body), 1)
+        if self._salvage is None or avg > self._salvage[0]:
+            self._salvage = (avg, copy.deepcopy(data), min_segments, max_segments, source_text)
+
+    def salvage(self) -> dict | None:
+        """全滅時の最終手段。落とした台本のうち最良の1本を緩い基準で通す。
+
+        下げるのは長さの基準だけで、反復・接地（元記事に無い固有名詞や数値）・
+        CTA・外国語混入の各チェックはそのまま効かせる。品質の下限は守りつつ、
+        「あと数文字足りない」だけで投稿がゼロになるのを防ぐ。
+        """
+        if self._salvage is None:
+            return None
+        avg, data, min_segments, max_segments, source_text = self._salvage
+        try:
             self._validate(data, min_segments=min_segments, max_segments=max_segments,
-                           source_text=source_text)
+                           source_text=source_text, min_avg_chars=_SALVAGE_MIN_AVG_CHARS)
+        except Exception as e:
+            logger.warning(f"救済候補も緩めた基準で不合格: {e!r}")
+            return None
+        logger.warning(
+            f"救済台本を採用: 本文平均 {avg:.1f} 字 "
+            f"(通常の合格ラインは {_MIN_AVG_CHARS} 字、救済ラインは {_SALVAGE_MIN_AVG_CHARS} 字)"
+        )
         return data
 
     def _chat_json(self, prompt: str, purpose: str = "script") -> dict:
@@ -562,18 +633,33 @@ class ClaudeScriptWriter:
             purpose="expand",
         )
         new_texts = rep.get("segments") or []
-        if len(new_texts) != len(texts):
-            raise ScriptTooShort(
-                f"リペアが段落数を変えた（{len(texts)} → {len(new_texts)}）ため破棄"
+        if not new_texts:
+            raise ScriptTooShort("リペアが段落を1つも返さなかった")
+
+        # 段落数がズレても丸ごと捨てない。捨てると 1 記事ぶんのトークンが無駄に
+        # なったうえで投稿ごと消える（実測 08-03: 9→10 と 11→10 の 2 件が
+        # これで全滅）。モデルは末尾を落としたり 2 段落を統合したりするが、
+        # 先頭からの対応は概ね保たれるので、対応が取れたペアだけ差し替える。
+        misaligned = len(new_texts) != len(texts)
+        if misaligned:
+            logger.warning(
+                f"リペアが段落数を変えた（{len(texts)} → {len(new_texts)}）— "
+                f"元の段落と内容が対応するものだけ差し替える"
             )
 
         # 「今より短くしない」はプロンプトの指示に任せず機械的に保証する。
         grown = 0
         for seg, new in zip(segments, new_texts):
-            new = (new or "").strip()
-            if len(new) > len(seg.get("text", "")):
-                seg["text"] = new
-                grown += 1
+            new  = (new or "").strip()
+            orig = seg.get("text", "")
+            if len(new) <= len(orig):
+                continue
+            # 段落数が合っているときは実績どおり無条件に採用する。ズレている
+            # ときだけ、別の段落を掴んでいないかを内容の重なりで確かめる。
+            if misaligned and not _keeps_topic(orig, new):
+                continue
+            seg["text"] = new
+            grown += 1
         body = [s.get("text", "") for s in segments][1:] or [s.get("text", "") for s in segments]
         logger.info(
             f"リペア完了: {grown}/{len(segments)} 段落を伸長、"
@@ -636,7 +722,8 @@ class ClaudeScriptWriter:
         return self.generate(item, channel=channel)
 
     def _validate(self, data: dict, min_segments: int = 12,
-                  max_segments: int | None = None, source_text: str = ""):
+                  max_segments: int | None = None, source_text: str = "",
+                  min_avg_chars: int = _MIN_AVG_CHARS):
         required = ["title", "description", "tags", "script_segments", "thumbnail_title", "image_search_keywords"]
         for key in required:
             if key not in data:
@@ -694,7 +781,10 @@ class ClaudeScriptWriter:
         body_texts = texts[1:] if len(texts) > 1 else texts
         total_chars = sum(len(t) for t in texts)
         avg_chars   = sum(len(t) for t in body_texts) / max(len(body_texts), 1)
-        short_segs  = sum(1 for t in body_texts if len(t) < 100)
+        # 段落単位の下限は平均の下限に連動させる。救済時は平均ごと下げているのに
+        # ここだけ固定にすると、平均を通した台本が必ずこちらで落ちる。
+        short_floor = min_avg_chars - 15
+        short_segs  = sum(1 for t in body_texts if len(t) < short_floor)
         if len(hook_text) > 110:
             logger.warning(
                 f"Hook segment is {len(hook_text)} chars (~{len(hook_text)/6.1:.0f}s) — "
@@ -702,15 +792,17 @@ class ClaudeScriptWriter:
             )
         # 長さ不足は ScriptTooShort で投げる。generate 側がこれだけを捕まえて、
         # 作り直しではなく伸ばすリペアに回す。
-        if avg_chars < 115:
+        if avg_chars < min_avg_chars:
             raise ScriptTooShort(
                 f"Average segment too short: {avg_chars:.1f} chars "
-                f"(segments after the hook must be 3-5 sentences, 120-170 chars)"
+                f"(minimum {min_avg_chars}; segments after the hook must be "
+                f"3-5 sentences, 120-170 chars)"
             )
         if short_segs > max(1, len(body_texts) * 0.15):
             raise ScriptTooShort(
-                f"Too many short segments: {short_segs}/{len(body_texts)} under 100 chars. "
-                f"Segments after the hook must be 120-170 chars (3-5 sentences)."
+                f"Too many short segments: {short_segs}/{len(body_texts)} under "
+                f"{short_floor} chars. Segments after the hook must be 120-170 "
+                f"chars (3-5 sentences)."
             )
 
         # ── 反復チェック ─────────────────────────────────────────────────

@@ -677,7 +677,17 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
             try:
                 script_data = writer.generate_deep_dive(item["title"], channel=channel)
             except Exception as e:
-                raise RuntimeError("All item attempts exhausted without generating a script") from e
+                # deep-dive も落ちたら、長さ不足で捨てた台本のうち最良の1本を
+                # 緩めた基準で拾い直す。実測 08-03 の全滅は本文平均 111.8 字
+                # ——合格ラインまで 3 字という台本を捨てて投稿ごと消していた。
+                script_data = writer.salvage()
+                if script_data is None:
+                    raise RuntimeError(
+                        "All item attempts exhausted without generating a script"
+                    ) from e
+                logger.warning(
+                    "deep-dive も失敗したため、長さ基準を緩めた救済台本で投稿を続行する"
+                )
         logger.info(f"Script generated: '{script_data['title']}' ({len(script_data['script_segments'])} segments)")
 
         return _run_shared_pipeline_stages(
