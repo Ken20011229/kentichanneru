@@ -4,8 +4,10 @@ import logging
 import os
 import re
 from pathlib import Path
-from groq import Groq, RateLimitError
+from groq import Groq, NotFoundError, RateLimitError
 from tenacity import retry, stop_after_attempt, wait_exponential
+
+from src.groq_models import call_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,7 @@ _SALVAGE_MIN_AVG_CHARS = 95
 class ScriptTooShort(ValueError):
     """段落が短いだけの不合格。作り直さず、伸ばすリペアで回復できる。
 
-    実測では llama-3.3-70b が本文平均 101 字、gpt-oss-120b が 88 字しか書かず、
+    実測では qwen3.6-27b が本文平均 104〜121 字、gpt-oss-120b が 88 字しか書かず、
     要求している 120〜170 字にはどちらもゼロから書かせる限り届かない。同じ
     プロンプトを投げ直しても同じ長さが返るだけなので、作り直しは 6,000 トークンを
     捨てるのと変わらない。既にある文を膨らませるほうが確実で、実測で 115→126 字。
@@ -102,17 +104,6 @@ def _spend_tokens(model: str, n: int):
 
 def _budget_left(model: str) -> int:
     return _TOKEN_BUDGET_PER_RUN - _tokens_used.get(model, 0)
-
-
-def _is_reasoning_model(model: str) -> bool:
-    """gpt-oss 系は推論モデルで、他とは呼び出し方が違う。
-
-    - response_format={"type":"json_object"} を付けると 400 json_validate_failed
-    - reasoning_effort を既定のままにすると推論だけで completion 上限を使い切り、
-      content が空のまま finish_reason="length" で返る（実測: 推論 3,070 トークン）
-    "low" にすると推論は約 38 トークンに収まり、JSON 本体が content に出る。
-    """
-    return "gpt-oss" in model
 
 
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.M)
@@ -461,10 +452,11 @@ JSONのみを返す。形式: {{"segments": ["1段落目の全文", "2段落目�
 class ClaudeScriptWriter:
     def __init__(self, config: dict):
         self.client = Groq(api_key=os.environ.get("GROQ_API_KEY") or config.get("groq_api_key", ""))
-        self.model = config.get("groq_model", "llama-3.3-70b-versatile")
-        # 本編モデルの日次枠が尽きたときの逃げ先。枠はモデルごとに独立しているので、
-        # 片方が 429 でも投稿を落とさずに済む。実測の文章量は 70B(101字) のほうが
-        # gpt-oss(88字) より上なので、あくまで本編は 70B を主・こちらを従とする。
+        self.model = config.get("groq_model", "qwen/qwen3.6-27b")
+        # 本編モデルの日次枠が尽きたとき・本編モデルが廃止されたときの逃げ先。
+        # 枠はモデルごとに独立しているので、片方が 429 でも投稿を落とさずに済む。
+        # 実測の文章量は qwen3.6-27b(120.6/136.8字) のほうが gpt-oss-120b
+        # (100.9〜125.5字) より上なので、本編は qwen を主・こちらを従とする。
         self.fallback_model = config.get("groq_fallback_model", "openai/gpt-oss-120b")
         # Groq のレート上限はモデルごとに独立した枠。リサーチを本編台本と同じ
         # モデルで回すと、フォールバックが本編用の日次予算を削ってしまう。
@@ -570,16 +562,23 @@ class ClaudeScriptWriter:
                 )
                 continue
 
-            kwargs = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-            if _is_reasoning_model(model):
-                kwargs["reasoning_effort"] = "low"
-            else:
-                kwargs["response_format"] = {"type": "json_object"}
+            kwargs = {"model": model, "messages": [{"role": "user", "content": prompt}],
+                      **call_kwargs(model, want_json=True)}
 
             try:
                 response = self.client.chat.completions.create(**kwargs)
             except RateLimitError as e:
                 logger.warning(f"[{purpose}] {model}: レート上限に到達、次のモデルへ — {e}")
+                last_exc = e
+                continue
+            except NotFoundError as e:
+                # モデルの廃止。Groq は llama-3.3-70b-versatile を予告なく落とし、
+                # ここで諦めていたせいで 2026-08-17〜08-19 の 5 回が全滅した
+                # （フォールバックは生きていたのに一度も呼ばれなかった）。
+                logger.error(
+                    f"[{purpose}] {model}: モデルが存在しない（廃止か権限なし）、"
+                    f"次のモデルへ — {e}"
+                )
                 last_exc = e
                 continue
 
@@ -671,9 +670,8 @@ class ClaudeScriptWriter:
         """Step 1: Generate a detailed research summary for the topic (plain text)."""
         prompt = _RESEARCH_PROMPT.format(original_title=original_title)
         kwargs = {"model": self.research_model,
-                  "messages": [{"role": "user", "content": prompt}]}
-        if _is_reasoning_model(self.research_model):
-            kwargs["reasoning_effort"] = "low"
+                  "messages": [{"role": "user", "content": prompt}],
+                  **call_kwargs(self.research_model)}
         response = self.client.chat.completions.create(**kwargs)
         text = (response.choices[0].message.content or "").strip()
         usage = getattr(response, "usage", None)

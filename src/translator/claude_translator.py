@@ -3,6 +3,8 @@ import os
 from groq import Groq
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from src.groq_models import call_kwargs
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,9 +38,10 @@ class ClaudeTranslator:
                     ),
                 }
             ],
-            # gpt-oss 系は推論モデル。effort を既定のままにすると推論だけで
-            # completion 上限を使い切り、content が空で返ることがある（実測）。
-            **({"reasoning_effort": "low"} if "gpt-oss" in self.model else {}),
+            # 思考の止め方はモデルごとに違う（src/groq_models.py 参照）。
+            # 既定のままだと推論だけで completion 上限を使い切り、content が
+            # 空で返ることがある（実測）。訳文は JSON ではないので want_json=False。
+            **call_kwargs(self.model),
         )
         raw = (response.choices[0].message.content or "").strip()
         lines = [l.strip() for l in raw.split("\n") if l.strip()]

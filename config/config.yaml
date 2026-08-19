@@ -1,10 +1,16 @@
 groq:
   groq_api_key: "${GROQ_API_KEY}"
   # レート上限はモデルごとに独立した枠なので、本編台本以外を別モデルへ逃がすと
-  # 本編用の日次トークン予算(70B は TPD 10万)をそのぶん温存できる。
-  groq_model: "llama-3.3-70b-versatile"           # 本編台本
-  # 本編モデルの日次枠が尽きたときの逃げ先。枠はモデルごとに独立しているので、
-  # 70B が 429 でもこちらで投稿を落とさずに済む。
+  # 本編用の日次トークン予算(TPD 10万)をそのぶん温存できる。
+  # 2026-08-17 に Groq が llama-3.3-70b-versatile を廃止し(404 model_not_found)、
+  # 5 回連続で投稿ごと落ちた。Llama 系のチャットモデルは Groq から全廃されている。
+  # 代替は実測で選定(同じ記事3本を generate() に通した本文平均):
+  #   qwen3.6-27b   120.6 / 136.8 字・最短 4 秒   ← 廃止された 70B(101字)より上
+  #   gpt-oss-120b  100.9 / 111.9 / 125.5 字      ← 3/3 通過で安定
+  #   gpt-oss-20b   1/3 しか通らず不採用
+  groq_model: "qwen/qwen3.6-27b"                  # 本編台本
+  # 本編モデルの日次枠が尽きたとき・そのモデルが廃止されたときの逃げ先。
+  # 枠はモデルごとに独立しているので、本編が 429 でも投稿を落とさずに済む。
   groq_fallback_model: "openai/gpt-oss-120b"
   groq_research_model: "openai/gpt-oss-120b"      # deep-dive のリサーチ
   groq_translate_model: "openai/gpt-oss-120b"     # 英→日翻訳
