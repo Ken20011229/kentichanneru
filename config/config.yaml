@@ -8,7 +8,10 @@ groq:
   #   qwen3.6-27b   120.6 / 136.8 字・最短 4 秒   ← 廃止された 70B(101字)より上
   #   gpt-oss-120b  100.9 / 111.9 / 125.5 字      ← 3/3 通過で安定
   #   gpt-oss-20b   1/3 しか通らず不採用
-  groq_model: "qwen/qwen3.6-27b"                  # 本編台本
+  # 2026-10 に qwen3.6-27b も廃止され qwen3.8-27b に置き換わった（毎回 404 →
+  # gpt-oss-120b に落ちていた）。呼び出し作法(reasoning_effort="none" +
+  # json_object)は 3.6 と同じで通ることを確認済み。
+  groq_model: "qwen/qwen3.8-27b"                  # 本編台本
   # 本編モデルの日次枠が尽きたとき・そのモデルが廃止されたときの逃げ先。
   # 枠はモデルごとに独立しているので、本編が 429 でも投稿を落とさずに済む。
   groq_fallback_model: "openai/gpt-oss-120b"
@@ -19,8 +22,8 @@ sources:
   rss:
     enabled: true
     feeds:
-      - name: "NHK NEWS WEB"
-        url: "https://www3.nhk.or.jp/rss/news/cat0.xml"
+      - name: "Yahoo!ニュース 主要"
+        url: "https://news.yahoo.co.jp/rss/topics/top-picks.xml"
         language: "ja"
       - name: "ITmedia News"
         url: "https://rss.itmedia.co.jp/rss/2.0/news_bursts.xml"
@@ -160,8 +163,8 @@ channels:
     badge_label: "ニュース速報"
     script_style: "ニュースキャスター。客観的・正確・簡潔に伝える。視聴者が内容を素早く理解できるよう心がける。"
     rss_feeds:
-      - url: "https://www3.nhk.or.jp/rss/news/cat0.xml"
-        name: "NHK NEWS WEB"
+      - url: "https://news.yahoo.co.jp/rss/topics/top-picks.xml"
+        name: "Yahoo!ニュース 主要"
         language: "ja"
       - url: "https://rss.itmedia.co.jp/rss/2.0/news_bursts.xml"
         name: "ITmedia"
@@ -198,7 +201,7 @@ channels:
       - url: "https://game.watch.impress.co.jp/data/rss/1.0/gmw/feed.rdf"
         name: "Game Watch"
         language: "ja"
-      - url: "https://www.4gamer.net/games/rss/4gamer_1024.rdf"
+      - url: "https://www.4gamer.net/rss/index.xml"
         name: "4Gamer.net"
         language: "ja"
     subreddits:
@@ -244,8 +247,8 @@ channels:
       - url: "https://news.yahoo.co.jp/rss/topics/science.xml"
         name: "Yahoo!科学"
         language: "ja"
-      - url: "https://news.mynavi.jp/rss/index.rss"
-        name: "Mynavi News"
+      - url: "https://sorae.info/feed"
+        name: "sorae 宇宙"
         language: "ja"
     subreddits:
       - science
@@ -278,8 +281,11 @@ channels:
     badge_label: "グルメ情報"
     script_style: "料理・グルメ系ナレーター。食への愛情と美味しさを伝える、温かみのある話し方。食文化・レシピ・トレンドグルメを楽しく紹介する。"
     rss_feeds:
-      - url: "https://news.livedoor.com/topics/rss/gourmet.xml"
-        name: "livedoor グルメ"
+      - url: "https://news.yahoo.co.jp/rss/media/impgrw/all.xml"
+        name: "グルメ Watch"
+        language: "ja"
+      - url: "https://news.yahoo.co.jp/rss/media/tabelog/all.xml"
+        name: "食べログマガジン"
         language: "ja"
     subreddits:
       - food
@@ -312,11 +318,14 @@ channels:
     badge_label: "旅行情報"
     script_style: "旅行・観光系ナレーター。行ってみたい！と思わせるワクワク感と臨場感を大切に、各地の魅力や穴場スポット・文化を生き生きと紹介する。"
     rss_feeds:
-      - url: "https://tabizine.jp/feed/"
-        name: "TABIZINE"
+      - url: "https://news.yahoo.co.jp/rss/media/imptrw/all.xml"
+        name: "トラベル Watch"
         language: "ja"
-      - url: "https://travel.spot-app.jp/feed/"
-        name: "旅色SPOTTABI"
+      - url: "https://news.yahoo.co.jp/rss/media/travelv/all.xml"
+        name: "トラベルボイス"
+        language: "ja"
+      - url: "https://www.traicy.com/feed"
+        name: "TRAICY"
         language: "ja"
     subreddits:
       - travel
@@ -331,8 +340,11 @@ channels:
     badge_label: "学びの時間"
     script_style: "教育・学習系ナレーター。「知らなかった！」「もっと知りたい！」と思わせる知的好奇心を刺激する語り口。難しいことをわかりやすく、面白く伝える。"
     rss_feeds:
-      - url: "https://resemom.jp/feed/"
-        name: "ReseMom"
+      - url: "https://news.yahoo.co.jp/rss/media/resemom/all.xml"
+        name: "リセマム"
+        language: "ja"
+      - url: "https://news.yahoo.co.jp/rss/media/benesseks/all.xml"
+        name: "ベネッセ教育情報"
         language: "ja"
     subreddits:
       - learnprogramming
@@ -348,13 +360,10 @@ channels:
     badge_label: "映画情報"
     script_style: "映画評論系ナレーター。作品の魅力・見どころ・背景を熱く語り、「観てみたい！」という気持ちを引き出す。ネタバレなしで核心を伝えるのが得意。"
     rss_feeds:
-      - url: "https://eiga.com/rss/news.rss"
-        name: "映画.com"
-        language: "ja"
       - url: "https://natalie.mu/eiga/feed/news"
         name: "映画ナタリー"
         language: "ja"
-      - url: "https://www.cinemacafe.net/sys/feed/"
+      - url: "https://www.cinemacafe.net/rss/index.rdf"
         name: "シネマカフェ"
         language: "ja"
     subreddits:
@@ -389,8 +398,11 @@ channels:
     badge_label: "動物・ペット"
     script_style: "ペット・動物系ナレーター。動物への愛情あふれる温かい語り口で、かわいい・面白い・感動するエピソードや生態の不思議を楽しく紹介する。"
     rss_feeds:
-      - url: "https://news.livedoor.com/topics/rss/animal.xml"
-        name: "livedoor 動物"
+      - url: "https://news.yahoo.co.jp/rss/media/inumag/all.xml"
+        name: "いぬのきもち"
+        language: "ja"
+      - url: "https://news.yahoo.co.jp/rss/media/nekomag/all.xml"
+        name: "ねこのきもち"
         language: "ja"
     subreddits:
       - aww
@@ -452,8 +464,8 @@ channels:
       - url: "https://news.yahoo.co.jp/rss/topics/local.xml"
         name: "Yahoo!地域"
         language: "ja"
-      - url: "https://tabizine.jp/feed/"
-        name: "TABIZINE"
+      - url: "https://news.yahoo.co.jp/rss/media/ryokoyom/all.xml"
+        name: "旅行読売"
         language: "ja"
     subreddits:
       - japan

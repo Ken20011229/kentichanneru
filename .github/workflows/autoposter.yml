@@ -2,8 +2,12 @@ name: YouTube AutoPoster
 
 on:
   schedule:
-    - cron: '0 22 * * *'   # 07:00 JST
-    - cron: '0 10 * * *'   # 19:00 JST
+    # schedule は GitHub 側の混雑で大きく遅れる（2026-10 実測: 朝は +2〜3.5h、
+    # 夜は +3.5〜6.5h）。夜の回が JST 1〜2 時着になり、その時間帯の Shorts は
+    # 中央値 約250再生（22〜0時台は 約900）だったので夜を前倒しする。
+    # 毎時 0 分は特に混むので半端な分にずらす。
+    - cron: '17 22 * * *'  # 07:17 JST（実着は 9〜10 時台）
+    - cron: '23 8 * * *'   # 17:23 JST（実着は 21〜0 時台）
   workflow_dispatch:
 
 jobs:
@@ -95,6 +99,14 @@ jobs:
           python -c "import json; json.load(open('config/credentials/token.json'))" \
             && echo "token.json: valid JSON" \
             || { echo "ERROR: token.json is empty or invalid — set YOUTUBE_TOKEN secret correctly"; exit 1; }
+
+      # 学習ループ（再生数取得 → evolver が strategy.json のジャンル重みを更新）は
+      # ローカルのタスクスケジューラでしか動いておらず、ローカルの video_log には
+      # 9本しか無いため、クラウドで投稿した数百本は一度も学習に使われていなかった。
+      # 投稿の直前に回して、その回のジャンル選択から反映させる。失敗しても投稿は続ける。
+      - name: Update stats & strategy
+        continue-on-error: true
+        run: python main.py --update-stats --no-competitors
 
       - name: Run pipeline
         env:

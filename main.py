@@ -44,6 +44,9 @@ def main():
     parser.add_argument("--test-analytics", action="store_true", help="Test YouTube Analytics API connection")
     parser.add_argument("--test-trends",    action="store_true", help="Test Google Trends fetch")
     parser.add_argument("--analyze-competitors", action="store_true", help="Fetch top competitor videos per genre")
+    # 競合検索は search.list(100 units) × 18ジャンル = 1,800 units。クラウドで毎回
+    # 回すと、アップロード(1,600 units × 1日4本)と合わせて日次枠 10,000 を超える。
+    parser.add_argument("--no-competitors", action="store_true", help="Skip competitor search during --update-stats")
     parser.add_argument("--config", default="config/config.yaml")
     args = parser.parse_args()
 
@@ -106,11 +109,12 @@ def main():
             logger.warning(f"Analytics API unavailable (CTR/retention skipped): {e}")
 
         # Fetch competitor title patterns per genre (best-effort, non-fatal)
-        try:
-            from src.analytics.competitor_analyzer import run as analyze_competitors
-            analyze_competitors(service, config["channels"])
-        except Exception as e:
-            logger.warning(f"Competitor analysis skipped: {e}")
+        if not args.no_competitors:
+            try:
+                from src.analytics.competitor_analyzer import run as analyze_competitors
+                analyze_competitors(service, config["channels"])
+            except Exception as e:
+                logger.warning(f"Competitor analysis skipped: {e}")
 
         # Always run self-improvement analysis after stats update
         logger.info("Running self-improvement analysis...")

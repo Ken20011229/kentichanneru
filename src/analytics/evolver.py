@@ -32,6 +32,38 @@ def _avg(values):
     return round(sum(vals) / len(vals), 4) if vals else 0.0
 
 
+def _median(values):
+    vals = sorted(values)
+    if not vals:
+        return 0.0
+    mid = len(vals) // 2
+    return float(vals[mid]) if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+
+
+# 投稿直後の動画は再生が伸びきっていない（Shorts は数日かけて伸びる）。
+# 0再生のまま混ぜると「最近選ばれたジャンル」ほど不当に低く出る。
+_MIN_AGE_DAYS = 3
+# ジャンルごとにこの本数が揃うまでは等重み。n=1 の当たり外れで固定しない。
+_MIN_SAMPLES_PER_CHANNEL = 3
+
+
+def _total_views(r: dict) -> int:
+    """本編 + Shorts の再生数。
+
+    実測（2026-10、全546本）で再生の88%は Shorts、横動画の中央値は26再生しか
+    ない。本編の views だけで重みを付けると、ほぼノイズでジャンルを選ぶことになる。
+    """
+    return (r.get("views") or 0) + (r.get("shorts_views") or 0)
+
+
+def _old_enough(r: dict) -> bool:
+    try:
+        uploaded = datetime.fromisoformat(r["uploaded_at"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    return (datetime.now(timezone.utc) - uploaded).days >= _MIN_AGE_DAYS
+
+
 def run(log_file: str = "data/video_log.json"):
     if not Path(log_file).exists():
         logger.info("No video log — nothing to evolve.")
@@ -56,7 +88,7 @@ def run(log_file: str = "data/video_log.json"):
     # 掛ける（片方だけ塞いでも、乱数の偏りがそのまま固定化される）。
     _MIN_VIDEOS_FOR_LEARNING = 20
     _MIN_VIEWS_FOR_LEARNING  = 50
-    max_views = max((r.get("views", 0) for r in with_stats), default=0)
+    max_views = max((_total_views(r) for r in with_stats), default=0)
     learning_ready = (
         len(with_stats) >= _MIN_VIDEOS_FOR_LEARNING and max_views >= _MIN_VIEWS_FOR_LEARNING
     )
@@ -72,21 +104,26 @@ def run(log_file: str = "data/video_log.json"):
     ch_ctr   = defaultdict(list)
     ch_ret   = defaultdict(list)
     for r in with_stats:
+        if not _old_enough(r):
+            continue
         ch = r.get("channel_id", "unknown")
-        ch_views[ch].append(r.get("views", 0))
+        ch_views[ch].append(_total_views(r))
     for r in with_analytics:
         ch = r.get("channel_id", "unknown")
         if r.get("ctr"):      ch_ctr[ch].append(r["ctr"])
         if r.get("avg_view_duration_sec"): ch_ret[ch].append(r["avg_view_duration_sec"])
 
-    avg_views  = {ch: _avg(v) for ch, v in ch_views.items()}
-    global_avg = _avg([v for vs in ch_views.values() for v in vs]) or 1.0
+    # 平均ではなく中央値で比べる。Shorts は1本が数千再生に跳ねることがあり、
+    # 平均だとその1本でジャンルの評価が決まってしまう。
+    avg_views  = {ch: _median(v) for ch, v in ch_views.items()}
+    global_avg = _median([v for vs in ch_views.values() for v in vs]) or 1.0
     # 母数が揃うまでは全チャンネル等重み。実データでは technology が「1本が
     # 0再生」というだけで weight 0.2（gaming 1.8 の1/9）まで落ちており、
     # n=1 の偶然がジャンル選定を半永久的に固定していた。
     if learning_ready:
         channel_weights = {
-            ch: round(min(2.0, max(0.2, avg / global_avg)), 3)
+            ch: (round(min(2.0, max(0.2, avg / global_avg)), 3)
+                 if len(ch_views[ch]) >= _MIN_SAMPLES_PER_CHANNEL else 1.0)
             for ch, avg in avg_views.items()
         }
     else:

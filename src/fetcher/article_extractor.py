@@ -32,10 +32,50 @@ def strip_source_footer(text: str) -> str:
     return re.sub(r"[ \t　]+", " ", text).strip()
 
 
+_YAHOO_ARTICLE = re.compile(r"https://news\.yahoo\.co\.jp/articles/[0-9a-f]{20,}")
+
+
+def _fetch_yahoo_body(url: str, timeout: int) -> str:
+    """Yahoo!ニュースの本文を `div.article_body` から取る。
+
+    trafilatura に任せると、/articles/ では本文ではなくサイドバーの
+    「アクセスランキング」（無関係な他記事の見出し5本、毎回ほぼ同じ約720字）を
+    本文として返していた。/pickup/ は要約だけのページなので、本記事
+    （/articles/<id>）へのリンクを辿ってから取る。
+    """
+    import requests
+    from bs4 import BeautifulSoup
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    html = requests.get(url, timeout=timeout, headers=headers).text
+    if "/pickup/" in url:
+        soup = BeautifulSoup(html, "html.parser")
+        link = next(
+            (a["href"] for a in soup.select("a[href]")
+             if _YAHOO_ARTICLE.match(a["href"]) and "sharer" not in a["href"]),
+            None,
+        )
+        if not link:
+            return ""
+        html = requests.get(_YAHOO_ARTICLE.match(link).group(0), timeout=timeout, headers=headers).text
+    node = BeautifulSoup(html, "html.parser").select_one("div.article_body")
+    return node.get_text("\n", strip=True) if node else ""
+
+
 def fetch_article_body(url: str, max_chars: int = 4000, timeout: int = 12) -> str:
     """記事本文を返す。取得できなければ空文字（呼び出し側で summary にフォールバック）。"""
     if not url or not url.startswith("http"):
         return ""
+    if url.startswith("https://news.yahoo.co.jp/"):
+        try:
+            body = strip_source_footer(_fetch_yahoo_body(url, timeout))
+        except Exception as e:
+            logger.warning(f"Yahoo article body extraction failed for {url}: {e}")
+            return ""
+        if len(body) < 120:
+            return ""
+        logger.info(f"Article body extracted (Yahoo): {len(body)} chars from {url}")
+        return body[:max_chars]
     try:
         import trafilatura
     except ImportError:
