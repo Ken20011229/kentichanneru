@@ -104,8 +104,16 @@ jobs:
       # ローカルのタスクスケジューラでしか動いておらず、ローカルの video_log には
       # 9本しか無いため、クラウドで投稿した数百本は一度も学習に使われていなかった。
       # 投稿の直前に回して、その回のジャンル選択から反映させる。失敗しても投稿は続ける。
+      # config.yaml の ${...} は未設定だと load_config が例外を投げる。
+      # このステップは YouTube API しか使わないのでダミー値でよい。
       - name: Update stats & strategy
         continue-on-error: true
+        env:
+          GROQ_API_KEY: UNUSED
+          PEXELS_API_KEY: UNUSED
+          GNEWS_API_KEY: UNUSED
+          REDDIT_CLIENT_ID: UNUSED
+          REDDIT_CLIENT_SECRET: UNUSED
         run: python main.py --update-stats --no-competitors
 
       - name: Run pipeline
