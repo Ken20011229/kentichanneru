@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from src.images.safe_open import safe_open_rgba
 # 折り返しの禁則判定は字幕と同じものを使う（熟語・数字＋助数詞・漢数字の
 # 位取りを行またぎで割らないための共通ルール）
-from src.video.subtitle_gen import _splits_word
+from src.video.subtitle_gen import _splits_word, phrases, wrap_phrases
 
 try:
     import resource
@@ -77,7 +77,21 @@ _TH_NO_LINE_END   = "（「『【〈《"
 
 
 def _wrap_px(draw: ImageDraw.ImageDraw, text: str, font, max_w: int) -> list[str]:
-    """max_w に収まるよう折り返す。日本語の禁則処理つき。
+    """max_w に収まるよう文節単位で折り返す。"""
+    return wrap_phrases(
+        text,
+        fits=lambda s: _tw(draw, s, font) <= max_w,
+        split_long=lambda p: _wrap_px_chars(draw, p, font, max_w),
+    )
+
+
+def _keeps_phrases(draw: ImageDraw.ImageDraw, text: str, font, max_w: int) -> bool:
+    """このフォントサイズで、どの文節も1行に収まるか。"""
+    return all(_tw(draw, p, font) <= max_w for p in phrases(text))
+
+
+def _wrap_px_chars(draw: ImageDraw.ImageDraw, text: str, font, max_w: int) -> list[str]:
+    """1文節で max_w を超えるときの折り返し。日本語の禁則処理つき。
 
     禁則が無かったため、実生成したサムネイルで「5日連 / 続」「過 / 去最長」の
     ような熟語分断や、閉じ括弧「」」が行頭に来る割れ方が出ていた。
@@ -193,7 +207,8 @@ def _fit_centered(draw, text: str, fp: str, max_w: int, top: int, bottom: int,
         ft = _font(fp, size)
         cand = _wrap_px(draw, text, ft, max_w)
         lh   = max((_th(draw, ln, ft) for ln in cand), default=size) + int(size * 0.22)
-        if len(cand) <= max_lines and lh * len(cand) <= (bottom - top):
+        if len(cand) <= max_lines and lh * len(cand) <= (bottom - top) \
+                and _keeps_phrases(draw, text, ft, max_w):
             font, lines = ft, cand
             break
     if font is None:
@@ -666,7 +681,8 @@ def generate_shorts_thumbnail(
         max_lh = max((_th(draw, ln, ft) for ln in lines), default=size)
         lh     = max_lh + 16
         total  = HOOK_H + (16 if hook else 0) + lh * len(lines)
-        if len(lines) <= 5 and total <= (CARD_BOT - CARD_T) - PAD * 2:
+        if len(lines) <= 5 and total <= (CARD_BOT - CARD_T) - PAD * 2 \
+                and _keeps_phrases(draw, main_text, ft, MAX_TW):
             font_title = ft
             break
     else:
@@ -1090,7 +1106,8 @@ def _render_band(*, bg_image_path: str, title_text: str, reaction_text: str,
         lh = max((_th(draw, ln, ft) for ln in lines), default=size) + 14
         total_h = lh * len(lines)
         avail = H - 30 - label_y
-        if len(lines) <= 4 and total_h <= avail:
+        if len(lines) <= 4 and total_h <= avail \
+                and _keeps_phrases(draw, main_text, ft, MAX_TW):
             font_title = ft
             break
     else:

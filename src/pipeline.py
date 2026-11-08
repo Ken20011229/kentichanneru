@@ -191,6 +191,40 @@ def _smart_trim(text: str, limit: int) -> str:
     return cut.rstrip("、。・ ") or text[:limit]
 
 
+_NOT_NEWS_TITLE_RE = re.compile(r"お知らせ|編集部から|出展します|プレゼント企画|[\[【]PR[\]】]")
+# これ未満の素材では「何が起きたのか」を説明しきれず、尺を一般論で埋めることになる。
+_MIN_EXPLAINABLE_CHARS = 300
+_MAX_ITEMS_SCANNED = 6
+
+
+def _select_explainable_item(config: dict, dedup, channel: dict) -> dict | None:
+    """動画にして内容が伝わる記事を選ぶ。
+
+    aggregator はスコア順の先頭を返すだけなので、媒体の告知（本番で「編集部からの
+    お知らせ」が選ばれていた）や本文の取れない記事もそのまま台本に回っていた。
+    基準を満たす記事が無いときは投稿を止めず、最も素材の多かった記事を返す。
+    """
+    best, best_chars = None, -1
+    for _ in range(_MAX_ITEMS_SCANNED):
+        item = fetch_and_select_item(config, dedup, channel=channel)
+        if not item:
+            break
+        dedup.mark_seen(item["id"])
+        if _NOT_NEWS_TITLE_RE.search(item.get("title", "")):
+            logger.info(f"Skipped non-news item: '{item['title']}'")
+            continue
+        item["body"] = fetch_article_body(item.get("url", ""))
+        chars = len((item["body"] or item.get("summary", "")).strip())
+        if chars >= _MIN_EXPLAINABLE_CHARS:
+            return item
+        logger.info(f"Skipped thin item ({chars} chars): '{item['title']}'")
+        if chars > best_chars:
+            best, best_chars = item, chars
+    if best:
+        logger.warning(f"No item reached {_MIN_EXPLAINABLE_CHARS} chars — using best ({best_chars} chars)")
+    return best
+
+
 def _pick_deep_dive_topic(config: dict) -> tuple[dict, dict]:
     """Read video_log.json and pick a past horizontal video topic to deep-dive on.
 
@@ -568,7 +602,7 @@ def _run_shared_pipeline_stages(
         shorts_title = script_data.get("shorts_title") or script_data["title"]
         shorts_meta = {
             **meta,
-            "title": _smart_trim(shorts_title, 27) + " #Shorts",
+            "title": _smart_trim(shorts_title, 45) + " #Shorts",
             "description": shorts_desc,
             "tags": meta["tags"] + ["Shorts", "YouTubeShorts"],
             # 本編と同じ題材なので、Shorts では登録者に通知しない。
@@ -615,12 +649,10 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
     try:
         # Stage 1: Fetch and select content
         dedup = Deduplicator(config["deduplication"])
-        item = fetch_and_select_item(config, dedup, channel=channel)
+        item = _select_explainable_item(config, dedup, channel)
         if not item:
             logger.info("No new content available. Skipping run.")
             return None
-
-        dedup.mark_seen(item["id"])
 
         # Stage 1b: グローバルフォールバックで拾った場合、記事に合うチャンネルへ
         # ブランディングを寄せ直す
@@ -656,10 +688,9 @@ def run_pipeline(config: dict = None, skip_upload: bool = False):
                     # 記事を替えても叩くトークンが無い。次の回のために枠を残して降りる。
                     logger.error(f"{cause} — 残りの記事は試さず、次の回に予算を残して中断する")
                     break
-                next_item = fetch_and_select_item(config, dedup, channel=channel)
+                next_item = _select_explainable_item(config, dedup, channel)
                 if not next_item:
                     raise RuntimeError("No more items available after script failures") from e
-                dedup.mark_seen(next_item["id"])
                 item = next_item
                 channel = _realign_channel(config, channel, item)
                 config["active_channel"] = channel

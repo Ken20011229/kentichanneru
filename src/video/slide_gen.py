@@ -16,6 +16,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 from src.images.safe_open import safe_open_rgba
+from src.video.subtitle_gen import phrases, wrap_phrases
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,14 @@ def _th(draw, text, font) -> int:
 
 
 def _wrap_px(draw, text, font, max_w) -> list[str]:
+    return wrap_phrases(
+        text,
+        fits=lambda s: _tw(draw, s, font) <= max_w,
+        split_long=lambda p: _wrap_px_chars(draw, p, font, max_w),
+    )
+
+
+def _wrap_px_chars(draw, text, font, max_w) -> list[str]:
     lines, cur = [], ""
     for ch in text:
         test = cur + ch
@@ -483,7 +492,8 @@ def _content_keyword(fp, keyword, accent, section_num, sec_label) -> Image.Image
             fk   = _font(fp, size)
             ls   = _wrap_px(draw, keyword, fk, avail_w)
             lh   = max((_th(draw, ln, fk) for ln in ls), default=size) + 22
-            if lh * len(ls) <= avail_h and len(ls) <= 3:
+            if lh * len(ls) <= avail_h and len(ls) <= 3 \
+                    and all(_tw(draw, p, fk) <= avail_w for p in phrases(keyword)):
                 font_kw, kw_lines = fk, ls
                 break
         else:

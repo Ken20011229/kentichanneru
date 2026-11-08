@@ -3,6 +3,8 @@ import re
 from datetime import date
 from pathlib import Path
 
+import budoux
+
 logger = logging.getLogger(__name__)
 
 # 1920px幅でフォント70pxのとき20文字は約1400px。中央寄せで x=260〜1660 になり
@@ -152,7 +154,54 @@ def _splits_word(text: str, i: int) -> bool:
     # 接頭辞を行末に取り残さない（「次回お / 会いしましょう」）
     if prev in "おご":
         return True
+    # 「2か / 月」「2 / か月」のように期間の表現を割らない
+    if prev.isdigit() and nxt in "かカヶ":
+        return True
+    if i >= 2 and text[i - 2].isdigit() and prev in "かカヶ" and nxt == "月":
+        return True
     return False
+
+
+_PHRASE_PARSER = budoux.load_default_japanese_parser()
+
+
+def phrases(text: str) -> list[str]:
+    """文節の列を返す。ただし熟語や「数字＋単位」の途中では区切らない。"""
+    out: list[str] = []
+    pos = 0
+    for part in _PHRASE_PARSER.parse(text):
+        if out and _splits_word(text, pos):
+            out[-1] += part
+        else:
+            out.append(part)
+        pos += len(part)
+    return out
+
+
+def wrap_phrases(text: str, fits, split_long) -> list[str]:
+    """文節単位で折り返す。1文節で幅を超えるときだけ split_long で割る。
+
+    文字単位の折り返しでは「「3歳」にな / ったアルト / くんの変化」のように
+    語の途中で改行されていた。
+    """
+    lines: list[str] = []
+    cur = ""
+    for phrase in phrases(text):
+        if fits(cur + phrase):
+            cur += phrase
+            continue
+        if cur:
+            lines.append(cur)
+            cur = ""
+        if fits(phrase):
+            cur = phrase
+            continue
+        pieces = split_long(phrase)
+        lines.extend(pieces[:-1])
+        cur = pieces[-1] if pieces else ""
+    if cur:
+        lines.append(cur)
+    return lines
 
 
 def _splits_word_strict(text: str, i: int) -> bool:
@@ -170,7 +219,27 @@ def _splits_word_strict(text: str, i: int) -> bool:
 
 
 def _wrap_one(text: str, max_chars: int) -> list[str]:
-    """1つの文を max_chars 以内の行に折る。文節と禁則処理を考慮する。
+    """1つの文を max_chars 以内の行に、文節単位で折る。"""
+    return wrap_phrases(
+        text,
+        fits=lambda s: len(s) <= max_chars,
+        split_long=lambda p: _split_long_phrase(p, max_chars),
+    )
+
+
+_VERB_ENDING_RE = re.compile(r"(なりました|なりません|ました|ません|でした|ます|です)[。！？、]?$")
+
+
+def _split_long_phrase(phrase: str, max_chars: int) -> list[str]:
+    """長い1文節を割る。語尾がまとまっていれば「…なりま / した。」と割らない。"""
+    m = _VERB_ENDING_RE.search(phrase)
+    if m and 0 < m.start() <= max_chars and len(phrase) - m.start() <= max_chars:
+        return [phrase[:m.start()], phrase[m.start():]]
+    return _wrap_by_rules(phrase, max_chars)
+
+
+def _wrap_by_rules(text: str, max_chars: int) -> list[str]:
+    """1文節で max_chars を超えるときの折り返し。禁則処理を考慮する。
 
     以前は「max_chars 位置から手前8文字だけ句読点を探し、無ければ無条件に
     切る」実装で、「以/上」「予/想」「くださ/い」のように単語や熟語が行を

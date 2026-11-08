@@ -11,10 +11,13 @@ groq:
   # 2026-10 に qwen3.6-27b も廃止され qwen3.8-27b に置き換わった（毎回 404 →
   # gpt-oss-120b に落ちていた）。呼び出し作法(reasoning_effort="none" +
   # json_object)は 3.6 と同じで通ることを確認済み。
-  groq_model: "qwen/qwen3.8-27b"                  # 本編台本
+  # 2026-11-08: qwen3.8-27b は on_demand の出力上限(OTPM 1000)と既定の completion
+  # 2048 に阻まれ、台本(約2,100トークン)が 429 か途中切れの JSON になる。本番では
+  # 1 回あたり 6,000 トークン前後を捨ててから gpt-oss-120b に落ちていた。
+  groq_model: "openai/gpt-oss-120b"               # 本編台本
   # 本編モデルの日次枠が尽きたとき・そのモデルが廃止されたときの逃げ先。
   # 枠はモデルごとに独立しているので、本編が 429 でも投稿を落とさずに済む。
-  groq_fallback_model: "openai/gpt-oss-120b"
+  groq_fallback_model: "openai/gpt-oss-20b"
   groq_research_model: "openai/gpt-oss-120b"      # deep-dive のリサーチ
   groq_translate_model: "openai/gpt-oss-120b"     # 英→日翻訳
 

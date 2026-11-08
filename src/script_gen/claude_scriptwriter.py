@@ -3,11 +3,14 @@ import json
 import logging
 import os
 import re
+import time
+import unicodedata
 from pathlib import Path
-from groq import Groq, NotFoundError, RateLimitError
+from groq import APIStatusError, Groq, NotFoundError, RateLimitError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.groq_models import call_kwargs
+from src.video.subtitle_gen import phrases
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +109,9 @@ def _budget_left(model: str) -> int:
     return _TOKEN_BUDGET_PER_RUN - _tokens_used.get(model, 0)
 
 
+_RETRY_IN_SECONDS_RE = re.compile(r"try again in (\d+(?:\.\d+)?)s")
+_MAX_RATE_LIMIT_WAIT_SEC = 20
+
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.M)
 
 
@@ -131,10 +137,86 @@ def _segment_range(material_chars: int) -> tuple[int, int]:
     if material_chars >= 2000:
         return 13, 16
     if material_chars >= 900:
-        return 11, 14
+        return 7, 9
     if material_chars >= 400:
-        return 9, 12
-    return 8, 10
+        return 4, 6
+    return 4, 5
+
+
+_MAX_MATERIAL_CHARS = 2600
+_SHORTS_MAX_SENTENCE = 38
+
+
+def _trim_material(material: str) -> str:
+    """素材を文の切れ目で詰める。gpt-oss-120b の TPM 上限 8,000 に収めるため。"""
+    if len(material) <= _MAX_MATERIAL_CHARS:
+        return material
+    cut = material[:_MAX_MATERIAL_CHARS]
+    return cut.rsplit("。", 1)[0] + "。" if "。" in cut else cut
+
+
+def _split_long_shorts(segments: list[dict]) -> list[dict]:
+    """長すぎる Shorts の文を読点で2枚に分ける。
+
+    Shorts は1文が1スライドなので、40字を超える文は同じ画が7秒以上続く。
+    再生数が伸びた Shorts は維持率66%以上に集中しており、静止は離脱に直結する。
+    """
+    out = []
+    for seg in segments:
+        text = seg.get("text", "")
+        commas = [i for i, ch in enumerate(text) if ch == "、" and 10 <= i < len(text) - 10]
+        if len(text) <= _SHORTS_MAX_SENTENCE or not commas:
+            out.append(seg)
+            continue
+        at = min(commas, key=lambda i: abs(i - len(text) / 2)) + 1
+        out.append({**seg, "text": text[:at]})
+        rest = {k: v for k, v in seg.items() if k != "image_prompt"}
+        out.append({**rest, "text": text[at:], "visual_type": "detail",
+                    "keyword": _keyword_from_text(text[at:], set())})
+    return out
+
+
+_VAGUE_TITLE_RE = re.compile(r"衝撃|驚き|驚愕|真相|裏側|正体|秘密|すぎる|すぎた")
+_MAX_BRIEF_TITLE_CHARS = 50
+
+
+def _replace_vague_titles(data: dict):
+    """煽り語だけで中身が分からないタイトルを、brief の一文に置き換える。
+
+    プロンプトで禁止しても出てくるうえ、作り直すと 7,000 トークンかかる。
+    brief.what は本文から抜き出した「何が起きたか」なので、そのまま使える。
+    """
+    what = str((data.get("brief") or {}).get("what") or "").strip().rstrip("。")
+    usable = 8 <= len(what) <= _MAX_BRIEF_TITLE_CHARS and "不明" not in what
+    if usable and _VAGUE_TITLE_RE.search(data.get("title", "")):
+        logger.info(f"Vague title replaced by brief: {data['title']!r} -> {what!r}")
+        data["title"] = what
+    if data.get("shorts_title") and _VAGUE_TITLE_RE.search(data["shorts_title"]):
+        data["shorts_title"] = data["title"]
+
+
+def _split_sentences(text: str) -> list[str]:
+    """句点で区切る。`_sentences` と違い短い文も捨てず、連結すれば原文に戻る。"""
+    return [p for p in re.split(r"(?<=[。！？])", text or "") if p.strip()]
+
+
+def _numbers(text: str) -> set[str]:
+    return set(re.findall(r"\d+(?:\.\d+)?", unicodedata.normalize("NFKC", text or "").replace(",", "")))
+
+
+def _unsupported_numbers(text: str, source_text: str) -> set[str]:
+    """元記事に無い2桁以上の数字。1桁は「3つ」のような数え方が多いので見ない。"""
+    return {n for n in _numbers(text) - _numbers(source_text) if len(n.replace(".", "")) >= 2}
+
+
+def _short_title(title: str, limit: int) -> str:
+    """文節の切れ目で limit 文字以内に縮める。"""
+    out = ""
+    for phrase in phrases(title):
+        if len(out) + len(phrase) > limit:
+            break
+        out += phrase
+    return out.rstrip("、，") or title[:limit]
 
 
 def _sentences(text: str) -> list[str]:
@@ -182,8 +264,43 @@ def _clean_title(title: str) -> str:
         stripped = title[m.end():].strip()
         if stripped:
             logger.warning(f"Stripped non-Japanese title tag: {m.group(0)!r}")
-            return stripped
-    return title
+            title = stripped
+    # 【緊急】は犬のストレスサインにもフィギュアの予約にも付いていた。内容を何も
+    # 伝えないうえ、実測でも再生数は伸びていない（横: 35.5 vs 26、Shorts の
+    # 「衝撃」入りは 236 vs 962）。
+    without_hype = _HYPE_TAG_RE.sub("", title).strip()
+    return without_hype or title
+
+
+# 誇張だけで中身のない【】タグ。タイトルから機械的に落とす。
+_HYPE_TAG_RE = re.compile(
+    r"[【\[［](?:緊急(?:速報)?|速報|衝撃|驚愕|判明|暴露|激変|崩壊|禁断|革命|悲報|朗報|閲覧注意)[】\]］]\s*"
+)
+
+# 「〜について詳しく見ていきましょう」のように、予告だけして中身を言わない文。
+# 本番の Xリーグの回は「何が起きたのか」の予告を6回繰り返したまま棄権の理由を
+# 一度も言わず、コメント欄が「何が起こったのか判らない」で埋まった。
+_META_ENDING_RE = re.compile(
+    r"(見ていき(ましょう|ます)|解説(します|していきます)|説明(します|していきます)|"
+    r"紹介(します|していきます)|お伝えします|整理(します|しましょう)|"
+    r"探ります|考察します|掘り下げます|迫ります)[。！]?$"
+)
+_META_MAX_CHARS = 60
+
+
+def _is_meta_sentence(sentence: str) -> bool:
+    """中身を言わずに次の話を予告するだけの文か。数字を含む文は事実扱いで残す。"""
+    s = sentence.strip()
+    return (len(s) <= _META_MAX_CHARS
+            and not re.search(r"\d", s)
+            and _META_ENDING_RE.search(s) is not None)
+
+
+def _strip_meta_sentences(text: str) -> str:
+    """予告だけの文を落とす。全文が該当するときは段落が消えないよう原文を返す。"""
+    parts = [p for p in re.split(r"(?<=[。！？])", text or "") if p.strip()]
+    kept = [p for p in parts if not _is_meta_sentence(p)]
+    return "".join(kept) if kept else text
 
 _HINTS_FILE = "data/prompt_hints.json"
 _COMPETITOR_INSIGHTS_FILE = "data/competitor_insights.json"
@@ -229,15 +346,6 @@ def _load_hints(channel_id: str = None) -> str:
                 lines.append("## 同ジャンルで今伸びている他チャンネルのタイトル例（参考にする、コピーはしない）")
                 for t in genre.get("top_titles", [])[:5]:
                     lines.append(f"- {t}")
-                # 他局の番組ブランド名や実在人物名（「スーパーJチャンネル」
-                # 「神谷宗幣VS辻元清美」など）が【】パターンとして混ざるため、
-                # 一般的な短い感情語だけを残す
-                patterns = [
-                    p for p in genre.get("top_bracket_patterns", [])
-                    if len(p) <= 5 and not re.search(r"[A-Za-z]{3,}|公式|チャンネル|VS|vs|番組", p)
-                ]
-                if patterns:
-                    lines.append(f"よく使われる【】パターン: {'、'.join(patterns)}")
         except Exception:
             pass
 
@@ -281,18 +389,24 @@ SCRIPT_PROMPT = """\
 - 同じ文・同じ言い回しを別の段落で繰り返さない（言い換えての再掲も不可）。
 - 媒体名（NHK NEWS など）や「続きを読む」といった配信上の文字列をナレーションに入れない。
 
-## まず考えてから書く
-このニュースを動画にするとき、どんな切り口が最も面白いか・驚きがあるかを考えてください。
-- 視聴者が「え、そうなの？」と前のめりになる角度はどこか
-- 数字・固有名詞・具体的な事実のうち、一番インパクトが強いものはどれか
-- タイトルはどんな言い回しが一番クリックしたくなるか（形式は自由）
+## ★最優先: このニュースを初めて聞く人に伝わること★
+視聴者はこの話題の前提を何も知らない。実際の動画には「何が起こったのか判らない」「何一つ意味がわからない」というコメントが付いている。原因は、結論を伏せたまま予告を続け、固有名詞を説明せず、肝心の事実を言わなかったこと。次を必ず守る。
+- **何が起きたのかを、1段落目で言い切る。** 「誰が・何を・どうした」を伏せない。謎かけで引っ張らない。
+- **視聴者が一番知りたい「なぜ」「どうなった」を2〜3段落目で答える。** 本文に書かれていなければ「理由は公表されていません」とはっきり言う。ぼかして次へ進まない。
+- **固有名詞・専門用語は、初出のときに一言で説明する。** 例:「Xリーグ（日本の社会人アメフトのトップリーグ）」「オーデマ・ピゲ（スイスの高級時計ブランド）」。説明は「何者か」だけにして、創業年や規模などの数字を足さない。
+- 本文に無い捜査手法・会議・SNSの反応・今後の見通しを作らない。人名は本文の表記を一字も変えずに使う。
+- **予告だけの文を書かない。** 「詳しく見ていきましょう」「解説します」「整理します」「この動画で分かることは3つです」は禁止。その文字数で事実を言う。
+- **段落の最後を疑問や予告で終わらせない。** 事実を言い切って次の事実へ進む。
+- 本文に無い一般論（「注目が集まっています」「影響を与えるでしょう」「信頼を揺るがす」「あなたの身近でも」）で埋めない。
+- 最後は要点の一文＋チャンネル登録・高評価の呼びかけで短く締める。
 
-## 品質基準（形式の縛りはないが、これだけは守る）
-- 最初の1〜2文で視聴者を引き込む（疑問・驚き・共感のどれかで）
-- 本文にある具体的な数字・固有名詞・事実を必ず入れる
-- タイトルと冒頭は断定的に書く（本編中で本文に無い推測を断定するのは禁止）
-- 視聴者が誰かに話したくなる「驚きの一点」を含める
-- 最後は自然にまとめ＋チャンネル登録・高評価の呼びかけで締める
+## brief（台本より先に埋める。ここが台本の設計図）
+本文から次を抜き出す。本文に無い項目は「不明」と書き、台本でも断定しない。
+- what: 何が起きたかを、前提知識ゼロの人に一文で（40字以内）
+- who: 登場する人物・組織と、それぞれ何者か
+- why: なぜ起きたか／なぜ話題なのか
+- result: 結果・今どうなっているか
+- viewer_question: 視聴者が最初に抱く疑問と、その答え
 
 ## ナレーション文体（AI音声で読み上げます）
 - 同じ語尾（〜です／〜ます／〜ています／〜ですね）を3文以上続けない。体言止め・問いかけを混ぜる。
@@ -303,8 +417,18 @@ SCRIPT_PROMPT = """\
 ## ★言語と文字の絶対ルール（違反すると動画が台無しになる）★
 - **すべて日本語で書く。** 簡体字・繁体字などの中国語の文字、ハングル、その他の外国語の文字を絶対に混ぜない。
   - 例:「これ」を「这」、「説明」を「说明」、「時間」を「时间」などと書くのは厳禁。日本語の漢字・ひらがな・カタカナのみを使う。
-- タイトルや強調に【】を使う場合、中身は必ず日本語にする（例:【判明】【衝撃】【緊急】）。**【revolution】のように英単語だけを【】で囲むのは禁止。**
-- Google や Excel など、正式名称が英語の固有名詞はそのまま英語表記でよい。
+- 英単語だけを【】で囲むのは禁止。Google や Excel など、正式名称が英語の固有名詞はそのまま英語表記でよい。
+- **「もの」「こと」「ため」は仮名で書く。** AI音声は「高校生もの」を「高校生物」と書くと「こうこうせいぶつ」と読み上げ、意味が通じなくなる。
+
+## ★タイトルの絶対ルール★
+タイトルだけ読んで「誰が・何をした話か」が分かること。
+- 良い例: 盗まれた4600万円の高級時計、1か月後にわび状付きで店へ返送 / 香取慎吾が49歳で高校生役、新作映画に主演
+- 悪い例: 【緊急】腕時計が衝撃の展開！ / 知事謝罪の裏側 / AI指紋の正体は？
+- 【緊急】【衝撃】【判明】【驚愕】などの煽りタグ、「驚きの」「衝撃の」「真相」「裏側」「正体」「秘密」は使わない。
+- 本文に無いことをタイトルで約束しない。
+
+## ★画像検索の絶対ルール★
+`image_search_keywords` と `image_prompt` は題材の「物・場所」を指定する（例: wristwatch display case, football stadium empty seats）。**実在の人物の話で人物の顔写真を探さない。** 無関係な人物の顔が映ると、その人の話だと誤解される。
 
 ## ★keyword（画面中央のグラフィック）の絶対ルール★
 - 各セグメントの keyword は、その回の題材そのものを表す具体的な語にする（例: 複合グラフ / グラフの種類 / Excel互換 / データ可視化）。
@@ -313,22 +437,23 @@ SCRIPT_PROMPT = """\
 
 ## 出力形式（JSON のみ、マークダウン不要）
 {{
-  "title": "動画タイトル（30文字以内、クリックしたくなる表現。形式は自由）",
-  "description": "YouTube説明欄（400〜500文字）。冒頭にキーワードを自然に含め、内容のポイント・背景・呼びかけ・ハッシュタグ10個を含める。",
+  "brief": {{"what": "...", "who": "...", "why": "...", "result": "...", "viewer_question": "..."}},
+  "title": "動画タイトル（40文字以内。タイトルだけで誰が何をした話か分かる文）",
+  "description": "YouTube説明欄（400〜500文字）。1文目で何が起きたかを言い切り、要点・背景・ハッシュタグ10個を含める。",
   "tags": ["タグ1", ...],
   "script_segments": [
-    {{"text": "4〜6文のナレーション段落。各文は句点で終わる。合計150〜200文字。", "keyword": "キーワード（10文字以内。なければ空文字）", "visual_type": "intro", "animation_style": "scale_intro"}},
-    {{"text": "4〜6文のナレーション段落。各文は句点で終わる。合計150〜200文字。", "keyword": "キーワード", "visual_type": "image", "animation_style": "fade", "image_prompt": "A detailed English prompt for FLUX image generation"}},
+    {{"text": "4〜6文のナレーション段落。各文は句点で終わる。合計150〜200文字。", "keyword": "キーワード（10文字以内。なければ空文字）", "visual_type": "intro"}},
+    {{"text": "4〜6文のナレーション段落。各文は句点で終わる。合計150〜200文字。", "keyword": "キーワード", "visual_type": "image", "image_prompt": "A detailed English prompt for FLUX image generation"}},
     ...
   ],
   "shorts_script_segments": [
-    {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード（10文字以内）", "visual_type": "intro", "animation_style": "pop"}},
-    {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード", "visual_type": "keyword", "animation_style": "slide_up"}},
-    {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード", "visual_type": "image", "animation_style": "fade", "image_prompt": "English portrait prompt for FLUX (9:16 vertical)"}},
+    {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード（10文字以内）", "visual_type": "intro"}},
+    {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード", "visual_type": "keyword"}},
+    {{"text": "ナレーション1文。句点で終わる。", "keyword": "キーワード", "visual_type": "image", "image_prompt": "English portrait prompt for FLUX (9:16 vertical)"}},
     ...
   ],
-  "shorts_hook": "Shorts冒頭で使う1〜2文（一瞬で引きつける内容）",
-  "shorts_title": "Shorts用タイトル（20文字以内。本編とは別の切り口で、単語の途中で切れない自然な日本語）",
+  "shorts_hook": "Shorts冒頭の1文。誰が何をしたかをそのまま言う（35文字以内）",
+  "shorts_title": "Shorts用タイトル（25文字以内。誰が何をした話か分かる、完結した日本語）",
   "thumbnail_title": "サムネイル用テキスト（8〜15文字。必ず数字か固有名詞を1つ含める。強調したい語は必ず「」（かぎ括弧）で囲むとアクセント色でハイライトされる。[ ] や 【 】ではなく必ず「」を使うこと。例:「5日連続」で過去最長 / 「40度」超えの猛暑）",
   "reaction_text": "キャラクターの吹き出し反応文（8文字以内。例: えっ、マジ!? / それだけ!? / 嘘でしょ!）",
   "image_search_keywords": ["英語キーワード1", "英語キーワード2", "英語キーワード3", "英語キーワード4", "英語キーワード5"]
@@ -340,24 +465,16 @@ SCRIPT_PROMPT = """\
 - **2段落目以降の各 `text`: 3〜5文、120〜170文字**（120文字未満は不可）
 - 素材が薄いときに段落を水増しして埋めるより、範囲の下限で密度を保つほうがよい
 
-## 映像レイアウト（4レイヤー独立）
-キャラ（固定）/ 記事画像（中央アニメ）/ テキスト（字幕アニメ）/ 背景 は独立して動く。
-`visual_type: "image"` を40〜50%以上のセグメントに使用。image_promptは英語で具体的なシーン・構図を指定。
+## visual_type（各セグメントに1つ）
+intro=冒頭 / keyword=用語や数字の強調 / point=要点 / detail=説明 / image=写真で見せたい場面（英語の image_prompt が必須。本編の3〜4割、Shorts は1〜2回まで）
 
-## コンテンツ設計
-- 驚きの事実を5つ以上（「知らなかった！」感）
-- 具体的な数字・比較・意外な切り口を必ず含める
-- 「あなたの生活にも影響する」視点を1箇所入れる
-
-## 構成（段落ごとに必ず「役割」を持たせる）
+## 構成（結論が先、詳しい話が後）
 段落数は上の指定に従うので、役割は**全体に対する位置**で決めること。
-- **最初の1段落（フック）**: 結論の一部だけを提示し「なぜそうなるのか」は伏せる（オープンループ）。50〜70文字と短く
-- **次の1段落（約束）**: この動画で分かることを3点宣言する（「3つ目が一番意外です」のように引きを作る）
-- **前半（全体の 20〜45% 付近）**: 前提と経緯。各段落の最後は次の段落への疑問で終える
-- **★中盤の山（全体の 45〜65% 付近）★**: 最大の驚き（本文にある数字）をここに置き、冒頭のオープンループを回収する
-- **後半（65〜90% 付近）**: 影響・比較・視聴者の生活との接続
-- **終盤（90% 付近）**: 展望（新しい問いを1つ残す）
-- **最終段落**: まとめ＋チャンネル登録・高評価のCTA。**CTAの後ろに段落を足さない**
+- **1段落目**: brief の what をそのまま言う。何が起きたかをここで言い切る。50〜70文字
+- **2段落目**: 登場する人物・組織・用語の説明と、なぜ話題なのか
+- **3段落目〜中盤**: viewer_question への答えを最初に述べ、続けて経緯を時系列で。本文にある数字と固有名詞はここで全部使う
+- **後半**: 関係者の発言・今後の予定・残っている未解明の点など、本文にある事実だけを書く。本文に無ければこの部分は作らず、全体を短くする
+- **最終段落**: 要点の一文＋チャンネル登録・高評価のCTA。**CTAの後ろに段落を足さない**
 
 ## script_segments の規則
 - 1段落目は50〜70文字、2段落目以降は3〜5文・120〜170文字
@@ -365,64 +482,12 @@ SCRIPT_PROMPT = """\
 - tags は12〜15個（「{channel_name}」を含める。1個30文字以内）
 
 ## shorts_script_segments について（縦画面 9:16 専用）
-- Shorts だけで完結する独立した動画として構成する（合計 55 秒以内）
-- セグメント数は**最低7文**（目安 9〜12 文）。必ず7文以上にすること
-- **最初のセグメントは `shorts_hook` と同じ内容にする。タイトルをそのまま読ませない。**
-- 各テキストは**20文字以内**に抑える（縦画面で2行以内に収まるよう短く）
-- **末尾にチャンネル登録のお願いを入れない。** Shorts はループ再生で維持率が決まるので、
-  最後の1文は最初の1文に自然につながる内容にしてループさせる（CTAは説明欄で行う）
+- **このShortsだけ見た人が、何の話か説明できること。** 合計 170〜230 文字（約30〜40秒）
+- 7〜10 文。**各文は主語と述語がそろった完結した文で、15〜35 文字。** 体言止めの断片を並べない
+- 1文目は `shorts_hook` と同じ内容で、誰が何をしたかを言う。2文目で登場する人物・組織・用語を一言で説明する
+- 3文目以降で「なぜ」「どうなった」を本文の数字・固有名詞で答え、最後の1文で結果か今後を言い切る
+- **末尾にチャンネル登録のお願いを入れない。** （CTAは説明欄で行う）
 
-## Shorts visual_type の選び方（縦画面向けレイアウト）
-| 値 | 縦画面での見え方 | 使うタイミング |
-|---|---|---|
-| "intro" | アクセントカラーのグラデーション背景＋巨大キーワード＋テキストカード | 最初の1〜2文（フック） |
-| "keyword" | 全幅アクセントバンドにキーワード、下にテキストカード | 重要な概念・数字・転換点 |
-| "point" | アクセントラインとバッジ＋大きめテキストカード | 強調したいポイント |
-| "detail" | キーワードヒーローボックス＋通常テキストカード（デフォルト） | 説明・解説 |
-| "image" | AI生成イラストがフルフレーム表示（キャラなし）、テキストオーバーレイ | 視覚的に印象づけたい場面（1〜2回まで） |
-
-## Shorts image_prompt について（visual_type が "image" のセグメントのみ）
-- 必ず英語で書く（FLUX画像生成AI向け）
-- **縦画面（9:16）** を意識した構図・被写体を指定する
-- 例: "close-up portrait of scientist with glowing blue data streams, vertical composition, cinematic lighting"
-- 例: "vertical shot of futuristic city skyline at night, neon reflections, dramatic sky, portrait orientation"
-
-## visual_type の選び方（自由に選んでよい）
-| 値 | 画面上での見え方 | 使うタイミングの例 |
-|---|---|---|
-| "intro" | アクセントカラーの大きな文字（動画冒頭向け） | 最初のセグメント |
-| "keyword" | アクセントカラーの背景ボックス＋白文字 | キーワード・概念を強調したいとき |
-| "point" | アクセントカラーの縁取り＋下からスライドイン | 重要ポイント・まとめ文 |
-| "detail" | シンプルな白文字＋暗い縁取り | 通常の解説・背景説明 |
-| "image" | AI生成イラストがフルフレームで表示、テキスト下部オーバーレイ | 視覚的に印象づけたい重要な場面（全体の20〜30%推奨） |
-
-## image_prompt の書き方（visual_type が "image" のセグメントのみ必須）
-- 必ず英語で書く
-- FLUX画像生成AIへの具体的な指示文（シーン・構図・雰囲気・スタイルを含める）
-- 例: "futuristic data center with glowing servers, cinematic blue lighting, photorealistic 4k"
-- 例: "scientist examining DNA structure, laboratory setting, dramatic lighting, hyperrealistic"
-- 抽象的すぎず、ニュースの内容を視覚的に表現するものにする
-
-## animation_style の選び方（省略可。省略時は visual_type に応じて自動決定）
-動画の雰囲気に合わせてセグメントごとに字幕テキストの登場アニメーションを指定できる。
-バリエーションを豊富に使い、同じ animation_style が連続しないよう意識すること。
-
-| 値 | 効果 | 向いている場面 |
-|---|---|---|
-| "fade" | シンプルなフェードイン | 落ち着いた解説、締め |
-| "scale_in" | ゆっくりズームイン（82%→100%） | 標準的な強調 |
-| "scale_intro" | 大きめズームイン（88%→100%） | 冒頭・タイトル |
-| "pop" | 瞬間的に弾けて登場（60%→112%→100%） | 驚き・数字の発表 |
-| "bounce" | 跳ねながら落ち着く（90%→106%→100%） | 勢いのある主張 |
-| "blur_in" | ぼかしからシャープに | 謎・技術・調査結果 |
-| "glow_in" | 光のにじみから登場 | 感動・発見・美しい事実 |
-| "spin_in" | 軽く回転して正位置に収まる | 転換点・意外な展開 |
-| "slide_up" | 画面下から上へスライド | 重要ポイント・強調 |
-| "slide_down" | 画面上から下へ落下 | 警告・注意・落とし穴 |
-| "slide_left" | 右端からスライドイン | テンポよく続く内容 |
-| "slide_right" | 左端からスライドイン | 場面転換・視点の切り替え |
-| "float_up" | ゆっくり浮かび上がる | 余韻・締め・感情的な場面 |
-| "snap" | 瞬間的にパッと現れる | 短い情報・箇条書き的な説明 |
 """
 
 
@@ -433,7 +498,8 @@ _EXPAND_PROMPT = """\
 ## 絶対条件
 - 段落の数・順序・話の流れは変えない（{n}個のまま返す）
 - 2段落目以降は必ず **120〜170文字（3〜5文）** にする。今より短くしない
-- 膨らませ方は「その段落で述べた事実の背景・理由・具体例・視聴者にとっての意味」を足す
+- 膨らませ方は「元記事にあってまだ使っていない事実」「登場する固有名詞・用語の一言説明」を足す
+- 「詳しく見ていきましょう」のような予告の文、「注目が集まっています」のような中身の無い一般論で埋めない
 - **元記事に無い地名・固有名詞・数値を新しく作らない**（下の元記事の範囲だけで書く）
 - 1段落目（フック）は 50〜70文字のまま短く保つ
 - 同じ文を他の段落で繰り返さない
@@ -447,6 +513,31 @@ _EXPAND_PROMPT = """\
 ## 出力
 JSONのみを返す。形式: {{"segments": ["1段落目の全文", "2段落目の全文", ...]}}
 """
+
+
+_FACT_CHECK_PROMPT = """\
+あなたはニュース動画の校閲者です。台本の各文を元記事と照合してください。
+
+## 判定基準
+- 元記事に無い具体的な内容（数値・年・発言・捜査や会議の手順・SNSの反応・今後の見通し）を述べる文の番号は unsupported に入れる。
+- 人名・地名・作品名の表記が元記事と違う文は、正しい表記に直した全文を corrections に入れる。
+- 固有名詞が何者かを数字なしで説明しているだけの一般常識（例: スイスの高級時計ブランド）は問題にしない。
+- 元記事と同じ意味の言い換え・要約、要点のまとめ、チャンネル登録の呼びかけは問題にしない。
+
+## 元記事
+{source}
+
+## 台本
+{sentences}
+
+## 出力
+JSONのみ: {{"unsupported": [番号, ...], "corrections": [{{"id": 番号, "text": "修正後の全文"}}]}}
+"""
+
+# 照合後に半分以上の文が消える台本は、部分修正では成り立たないので作り直す。
+_MAX_REMOVED_RATIO = 0.5
+_MIN_BODY_SEGMENTS = 3
+_MIN_SHORTS_SEGMENTS = 5
 
 
 class ClaudeScriptWriter:
@@ -473,7 +564,7 @@ class ClaudeScriptWriter:
 
         # 素材は本文を優先。要約しか無い記事に長尺を要求すると、埋めるために
         # 元記事に無い事実を創作する。素材の量に応じて段落数の要求を変える。
-        material = (item.get("body") or "").strip() or item.get("summary", "")
+        material = _trim_material((item.get("body") or "").strip() or item.get("summary", ""))
         min_segments, max_segments = _segment_range(len(material))
 
         prompt = SCRIPT_PROMPT.format(
@@ -505,7 +596,93 @@ class ClaudeScriptWriter:
             except ScriptTooShort:
                 self._remember_salvage(data, min_segments, max_segments, source_text)
                 raise
+        self._verify_facts(data, source_text)
         return data
+
+    def _flagged_by_llm(self, sentences: list[str], source_text: str) -> tuple[set[int], dict[int, str]]:
+        """元記事と照合し、裏付けのない文の番号と表記の修正を返す。
+
+        API の失敗で投稿を止めないよう、失敗時は空を返して機械チェックだけで進める。
+        """
+        numbered = "\n".join(f"{i}. {s}" for i, s in enumerate(sentences))
+        try:
+            result = self._chat_json(
+                _FACT_CHECK_PROMPT.format(source=source_text, sentences=numbered),
+                purpose="fact-check",
+            )
+        except Exception as e:
+            logger.warning(f"Fact check skipped, numeric check only: {e!r}")
+            return set(), {}
+        valid = range(len(sentences))
+        unsupported = {i for i in result.get("unsupported") or [] if i in valid}
+        corrections = {
+            c["id"]: str(c["text"]).strip()
+            for c in result.get("corrections") or []
+            if isinstance(c, dict) and c.get("id") in valid and str(c.get("text") or "").strip()
+        }
+        return unsupported, corrections
+
+    def _verify_facts(self, data: dict, source_text: str):
+        """元記事に裏付けのない文を台本から取り除き、固有名詞の表記を直す。
+
+        「1795年創業」「堤雅人（正しくは堺雅人）」のような誤りはプロンプトの禁止だけ
+        では止まらなかった。LLM の照合に加え、元記事に無い数字を含む文は機械的にも
+        落とす。元記事が無い場合は照合のしようがないので何もしない。
+        """
+        if not source_text:
+            return
+        script = data["script_segments"]
+        shorts = data.get("shorts_script_segments") or []
+        pieces = [[p for p in _split_sentences(s.get("text", ""))] for s in script + shorts]
+        flat = [(si, pi) for si, parts in enumerate(pieces) for pi in range(len(parts))]
+        if not flat:
+            return
+
+        unsupported, corrections = self._flagged_by_llm(
+            [pieces[si][pi] for si, pi in flat], source_text
+        )
+        removed = 0
+        for n, (si, pi) in enumerate(flat):
+            text = corrections.get(n, pieces[si][pi])
+            is_cta = _CTA_RE.search(text) is not None
+            if not is_cta and (n in unsupported or _unsupported_numbers(text, source_text)):
+                logger.info(f"Fact check removed: {text}")
+                text = ""
+                removed += 1
+            pieces[si][pi] = text
+
+        if removed > len(flat) * _MAX_REMOVED_RATIO:
+            raise ValueError(f"Fact check removed {removed}/{len(flat)} sentences — rewriting")
+
+        for seg, parts in zip(script + shorts, pieces):
+            seg["text"] = "".join(parts)
+        script[:] = [s for s in script if s["text"].strip()]
+        shorts[:] = [s for s in shorts if s["text"].strip()]
+        if len(script) < _MIN_BODY_SEGMENTS:
+            raise ValueError(f"Only {len(script)} script segments left after fact check")
+        if shorts and len(shorts) < _MIN_SHORTS_SEGMENTS:
+            raise ValueError(f"Only {len(shorts)} shorts segments left after fact check")
+        script[0]["visual_type"] = "intro"
+        if shorts:
+            shorts[0]["visual_type"] = "intro"
+        data["description"] = "".join(
+            p for p in _split_sentences(data.get("description", ""))
+            if not _unsupported_numbers(p, source_text)
+        )
+        self._fix_title_numbers(data, source_text)
+        logger.info(f"Fact check: {removed}/{len(flat)} sentences removed, "
+                    f"{len(corrections)} corrected")
+
+    @staticmethod
+    def _fix_title_numbers(data: dict, source_text: str):
+        """元記事に無い数字をタイトル類に出さない。"""
+        what = str((data.get("brief") or {}).get("what") or "").strip().rstrip("。")
+        if _unsupported_numbers(data.get("title", ""), source_text) and what:
+            data["title"] = what
+        if _unsupported_numbers(data.get("shorts_title", ""), source_text):
+            data["shorts_title"] = data["title"]
+        if _unsupported_numbers(data.get("thumbnail_title", ""), source_text):
+            data["thumbnail_title"] = _short_title(data["title"], 16)
 
     def _remember_salvage(self, data: dict, min_segments: int,
                           max_segments: int | None, source_text: str):
@@ -536,6 +713,7 @@ class ClaudeScriptWriter:
         try:
             self._validate(data, min_segments=min_segments, max_segments=max_segments,
                            source_text=source_text, min_avg_chars=_SALVAGE_MIN_AVG_CHARS)
+            self._verify_facts(data, source_text)
         except Exception as e:
             logger.warning(f"救済候補も緩めた基準で不合格: {e!r}")
             return None
@@ -544,6 +722,17 @@ class ClaudeScriptWriter:
             f"(通常の合格ラインは {_MIN_AVG_CHARS} 字、救済ラインは {_SALVAGE_MIN_AVG_CHARS} 字)"
         )
         return data
+
+    def _create_waiting_briefly(self, kwargs: dict):
+        """分単位の枠で数秒待てば通る 429 は、低品質なモデルへ落とさず同じモデルで待つ。"""
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        except RateLimitError as e:
+            m = _RETRY_IN_SECONDS_RE.search(str(e))
+            if not m or float(m.group(1)) > _MAX_RATE_LIMIT_WAIT_SEC:
+                raise
+            time.sleep(float(m.group(1)) + 0.5)
+            return self.client.chat.completions.create(**kwargs)
 
     def _chat_json(self, prompt: str, purpose: str = "script") -> dict:
         """JSON を返させる。日次枠が尽きているモデルは飛ばして次のモデルへ回す。
@@ -566,7 +755,7 @@ class ClaudeScriptWriter:
                       **call_kwargs(model, want_json=True)}
 
             try:
-                response = self.client.chat.completions.create(**kwargs)
+                response = self._create_waiting_briefly(kwargs)
             except RateLimitError as e:
                 logger.warning(f"[{purpose}] {model}: レート上限に到達、次のモデルへ — {e}")
                 last_exc = e
@@ -579,6 +768,14 @@ class ClaudeScriptWriter:
                     f"[{purpose}] {model}: モデルが存在しない（廃止か権限なし）、"
                     f"次のモデルへ — {e}"
                 )
+                last_exc = e
+                continue
+            except APIStatusError as e:
+                # 413 はリクエストが TPM 上限より大きいときに返る。上限はモデルごとに
+                # 違うので、ここで投稿を落とさず次のモデルに回す。
+                if e.status_code != 413:
+                    raise
+                logger.warning(f"[{purpose}] {model}: リクエストが大きすぎる、次のモデルへ — {e}")
                 last_exc = e
                 continue
 
@@ -729,10 +926,18 @@ class ClaudeScriptWriter:
 
         # Strip leaked English-only emphasis tags from the title (e.g. 【revolution】)
         data["title"] = _clean_title(data.get("title", ""))
+        if data.get("shorts_title"):
+            data["shorts_title"] = _clean_title(data["shorts_title"])
+        _replace_vague_titles(data)
 
         segments = data["script_segments"]
         if not segments:
             raise ValueError("script_segments is empty")
+
+        # 予告だけの文は長さの判定より先に落とす。残りが短ければ既存のリペアが
+        # 事実で埋め直す。
+        for seg in segments:
+            seg["text"] = _strip_meta_sentences(seg.get("text", ""))
 
         # Reject any non-Japanese (Chinese/Korean) character leaked into on-screen
         # text. One stray simplified-Chinese char (e.g. 这) reads as a glaring
@@ -863,7 +1068,7 @@ class ClaudeScriptWriter:
         tt_len = len(re.sub(r"[「」\[\]［］]", "", tt))
         if not (6 <= tt_len <= 16):
             fixed = _clean_title(data.get("title", ""))
-            fixed = re.sub(r"[【\[［].*?[】\]］]", "", fixed).strip()[:16]
+            fixed = _short_title(re.sub(r"[【\[［].*?[】\]］]", "", fixed).strip(), 16)
             logger.warning(
                 f"thumbnail_title was {tt_len} chars ({tt!r}) — a 3-character thumbnail "
                 f"gives no reason to click; falling back to {fixed!r}"
@@ -967,6 +1172,9 @@ class ClaudeScriptWriter:
                 if hook and title_core and title_core[:10] and title_core[:10] in first:
                     logger.info("Shorts opener was the title — replacing with shorts_hook")
                     shorts_segs[0]["text"] = hook
+            # フックの差し替えより後に行う。先に分割すると、前半だけが差し替えられて
+            # 後半が重複して読まれる。
+            shorts_segs[:] = _split_long_shorts(shorts_segs)
             # 末尾の定型CTAは Shorts のループを断ち切るので落とす（説明欄で行う）
             while len(shorts_segs) > 5 and (
                 _CTA_RE.search(shorts_segs[-1].get("text", ""))
